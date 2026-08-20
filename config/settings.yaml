@@ -1,0 +1,22 @@
+# Local application settings. No secrets belong here — see SECURITY.md.
+source_material_dir: "source_material"
+output_dir: "local_data/runs"
+upload_dir: "local_data/uploads"
+raw_sources_dir: "local_data/raw_sources"
+database_path: "local_data/database/app.db"
+log_dir: "local_data/logs"
+
+templates:
+  en: "20260511 Cash and Cash Equivalents EN.xlsx"
+  fr: "20260511 Cash and Cash Equivalents FR.xlsx"
+
+renderer:
+  preference: ["excel_com", "libreoffice"]
+
+naming:
+  date_format: "%Y%m%d"
+  package_prefix: "Cash and Cash Equivalents"
+
+schedule:
+  enabled: false
+  cron: "0 7 * * MON"  # informational only in the MVP; no scheduler is wired up

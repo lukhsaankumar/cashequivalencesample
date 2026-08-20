@@ -1,0 +1,174 @@
+# Verified against 20260511 Cash and Cash Equivalents EN.xlsx — see docs/workbook_mapping.md.
+# Row ranges are scan windows, not trusted positions: the writer locates each provider by
+# code/identity within the window and raises WORKBOOK_MAPPING_INVALID if a code isn't found.
+language: en
+
+sheets:
+  cover: "Cover"
+  executive_summary: "Executive Summary"
+  cash: "Cash"
+  tbills: "TBills"
+  hisa: "HISA"
+  cashable_term_deposits: "Cashable & Term Deposits"
+  gic_1yr_5yr: "GIC 1yr-5yr"
+  money_market_funds: "Money Market Funds"
+
+report_date:
+  sheet: cover
+  cell: "I29"
+
+prime:
+  sheet: cash
+  label_cell: "D30"
+  label_text: "Bank Prime Rate"
+  value_cell: "D31"
+
+fed_funds:
+  sheet: cash
+  label_cell: "H30"
+  label_text: "Federal Funds Rate"
+  value_cell: "H31"
+
+money_market_text:
+  sheet: executive_summary
+  cad_cell: "A25"
+  us_cell: "A28"
+  template: "Current Yield {rate}"
+
+tbills:
+  sheet: tbills
+  canadian:
+    maturity_cells: ["A15", "C15", "E15", "G15", "I15"]
+    rate_cells: ["A19", "C19", "E19", "G19", "I19"]
+  us:
+    maturity_cells: ["A24", "C24", "E24", "G24", "I24"]
+    rate_cells: ["A28", "C28", "E28", "G28", "I28"]
+
+cashable_gic:
+  sheet: cashable_term_deposits
+  header_row: 15
+  data_row_start: 17
+  data_row_end: 26
+  issuer_col: "A"
+  code_col: "D"
+  rate_col: "F"
+  # cashable codes use the "R" (redeemable) suffix in GIC Rates.xlsx, e.g. BNSGICR
+
+term_deposits:
+  sheet: cashable_term_deposits
+  header_row: 30
+  data_row_start: 32
+  data_row_end: 43
+  issuer_col: "A"
+  code_col: "D"
+  buckets:
+    30: "E"
+    60: "F"
+    90: "G"
+    120: "H"
+    180: "I"
+    270: "J"
+  # term-deposit codes use the "P" (payout/short-term) suffix, e.g. BNSGICP
+
+gic_annual:
+  sheet: gic_1yr_5yr
+  header_row: 12
+  data_row_start: 14
+  data_row_end: 25
+  issuer_col: "A"
+  code_col: "D"
+  term_years_cols:
+    1: "E"
+    2: "F"
+    3: "G"
+    4: "H"
+    5: "I"
+
+gic_compound:
+  sheet: gic_1yr_5yr
+  header_row: 28
+  data_row_start: 30
+  data_row_end: 41
+  issuer_col: "A"
+  code_col: "D"
+  term_years_cols:
+    1: "E"
+    2: "F"
+    3: "G"
+    4: "H"
+    5: "I"
+
+gic_monthly:
+  sheet: gic_1yr_5yr
+  header_row: 44
+  data_row_start: 46
+  data_row_end: 57
+  issuer_col: "A"
+  code_col: "D"
+  term_years_cols:
+    1: "E"
+    2: "F"
+    3: "G"
+    4: "H"
+    5: "I"
+
+hisa:
+  sheet: hisa
+  header_row: 22
+  cdn_data_row_start: 23
+  cdn_data_row_end: 40
+  us_data_row_start: 43
+  us_data_row_end: 52
+  issuer_col: "A"
+  fund_code_col: "C"
+  minimum_col: "D"
+  maximum_col: "E"
+  corporate_eligible_col: "F"
+  cdic_col: "G"
+  yield_col: "H"
+  cdn_selected_name_cell: "N12"
+  cdn_selected_rate_cell: "N13"
+  us_selected_name_cell: "N16"
+  us_selected_rate_cell: "N17"
+
+money_market_comparison:
+  sheet: money_market_funds
+  status: "BUSINESS_SCOPE_UNCONFIRMED"
+  cad_data_row_start: 17
+  cad_data_row_end: 26
+  us_data_row_start: 32
+  us_data_row_end: 41
+  issuer_col: "A"
+  yield_col: "J"
+
+# Source file (GIC Rates.xlsx, sheet "Eng") block layout — verified against the real file.
+gic_rates_source:
+  sheet: "Eng"
+  code_col: "B"
+  dealer_col: "C"
+  min_col: "D"
+  annual:
+    header_row: 7
+    data_row_start: 9
+    data_row_end: 20
+    term_years_cols: {1: "E", 2: "F", 3: "G", 4: "H", 5: "I"}
+  monthly:
+    header_row: 24
+    data_row_start: 26
+    data_row_end: 37
+    term_years_cols: {1: "E", 2: "F", 3: "G", 4: "H", 5: "I"}
+  compound:
+    header_row: 43
+    data_row_start: 45
+    data_row_end: 56
+    term_years_cols: {1: "E", 2: "F", 3: "G", 4: "H", 5: "I"}
+  short_term_deposits:
+    header_row: 67
+    data_row_start: 69
+    data_row_end: 80
+    buckets: {30: "E", 60: "F", 90: "G", 120: "H", 180: "I", 270: "J"}
+  cashables:
+    header_row: 88
+    data_row_start: 89
+    data_row_end: 96
+    rate_col: "E"

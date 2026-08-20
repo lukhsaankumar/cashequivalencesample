@@ -1,0 +1,16 @@
+# Canonical provider display name, keyed by the code *prefix* shared across the R/P/G/C product
+# code suffixes used in GIC Rates.xlsx (e.g. BNSGICR, BNSGICP, BNSG all belong to BNS).
+# Used to normalize provider identity across source files and workbook rows.
+providers:
+  B2B: "B2B Bank"
+  BMO: "Bank of Montreal"
+  BMT: "BMO Mortgage GIC"
+  BOM: "BMO Trust Company"
+  BNS: "Bank of Nova Scotia"
+  EQB: "Equitable Bank"
+  EQT: "Equitable Trust"
+  HOBK: "Home Bank GIC"
+  HTC: "Home Trust Company"
+  LBC: "Laurentian Bank"
+  MBC: "Manulife Bank"
+  NBC: "National Bank"

@@ -1,0 +1,45 @@
+# Business rules that are not fully confirmed by written documentation. Each is exposed here
+# as configuration (per master prompt §9) rather than hardcoded, with a *_status flag so the UI
+# can surface it as a review warning instead of a silent guess.
+
+fed_funds:
+  rule: "UPPER_BOUND"
+  rule_status: "UNCONFIRMED_BUSINESS_RULE"
+  allowed_rules: ["UPPER_BOUND", "LOWER_BOUND", "MIDPOINT", "EFFECTIVE_RATE", "MANUAL"]
+
+hisa_summary_selection:
+  # Identity (not row number) of the currently-approved "highest rate" product per the real
+  # workbook's hardcoded HISA!N12/N13/N16/N17 formulas (see docs/workbook_mapping.md). This is
+  # a business/CDIC-eligibility decision, not a formula, and must never be replaced by
+  # max(all_visible_rates).
+  cdn:
+    provider: "IG Equitable Bank High Interest"
+    fund_code: "EQB110 - Individual"
+  us:
+    provider: "IG Equitable Bank US Personal"
+    fund_code: "EQB2100 - Individual"
+  status: "CONFIGURED_FROM_CURRENT_WORKBOOK"
+  warn_if_higher_rate_excluded: true
+
+money_market_comparison_table:
+  # Money Market Funds sheet's competitor comparison table (CIBC/TD/etc, INDEX/MATCH(MAX(...)))
+  # has no documented source/hyperlink anywhere in the supplied material.
+  enabled: false
+  status: "BUSINESS_SCOPE_UNCONFIRMED"
+
+bankers_acceptance:
+  enabled: false
+  status: "BUSINESS_SCOPE_UNCONFIRMED"
+  reason: "Sheet exists in the workbook but is absent from both 7-page reference PDFs."
+
+tbill_commission:
+  # Posted T-bill rates are gross; the workbook explicitly instructs advisors to use a separate
+  # commission calculator before quoting a client. The MVP never derives a net rate.
+  calculate_net_rate: false
+  status: "OUT_OF_SCOPE_BY_DESIGN"
+
+percentage_scaling:
+  # Any parsed rate > 1 is assumed to be in "percent form" (e.g. 3.30 meaning 3.30%) and is
+  # divided by 100. Any value <= 1 is assumed already canonical. Verified against every GIC
+  # Rates.xlsx value in the May 2026 snapshot (all in [0.18, 4.09] percent-form).
+  percent_form_threshold: 1

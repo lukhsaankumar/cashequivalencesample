@@ -1,0 +1,131 @@
+# Verified against 20260511 Cash and Cash Equivalents FR.xlsx.
+#
+# IMPORTANT, discovered during bootstrap (see docs/workbook_mapping.md "French formatting"
+# section): the FR workbook is NOT a coordinate-for-coordinate mirror of EN. Some sheets
+# (Cashable/Term Deposits, GIC 1yr-5yr, TBills, report date) use identical coordinates and
+# numeric Decimal values with French number formatting baked into the cell style. Others
+# (Cash, HISA) store the rate as a literal pre-formatted French-locale TEXT STRING
+# ("4,45%", "1,80%") at DIFFERENT coordinates than the EN sheet, and HISA's row offsets from
+# EN were not individually confirmed for every provider row. Rather than hardcode possibly-wrong
+# FR row numbers, sections marked `discovery: scan` locate providers by code/identity within a
+# generous row window at runtime (same mechanism used for EN, just a wider window), and raise
+# WORKBOOK_LABEL_MISMATCH / WORKBOOK_MAPPING_INVALID if the expected header text or provider
+# code cannot be found — never silently guessing a coordinate. See ASSUMPTIONS.md.
+language: fr
+
+sheets:
+  cover: "Page couverture"
+  executive_summary: "Sommaire"
+  cash: "Espèces"
+  tbills: "Bons du Trésor"
+  hisa: "CEIE"
+  cashable_term_deposits: "CPG et dépôts à terme"
+  gic_1yr_5yr: "CPG 1 an-5 ans"
+  money_market_funds: "Money Market Funds"
+
+report_date:
+  sheet: cover
+  cell: "I29"   # verified identical to EN
+
+prime:
+  sheet: cash
+  label_cell: "E31"   # verified: "Canada - Taux préférentiel" (EN used D30 — different column+row)
+  label_text: "préférentiel"
+  value_cell: "E32"   # verified: literal text "4,45%", not a number
+  value_format: french_percent_text
+
+fed_funds:
+  sheet: cash
+  label_cell: "H31"   # verified: "US - Taux préférentiel"
+  label_text: "préférentiel"
+  value_cell: "H32"
+  value_format: french_percent_text
+
+money_market_text:
+  sheet: executive_summary
+  cad_cell: "A25"   # verified identical to EN
+  us_cell: "A28"
+  template: "Taux courant {rate}"
+  # observed convention: whole-percent values drop the decimals ("2%"), others show 2dp ("2,82%")
+  value_format: french_percent_text_trim_zero
+
+tbills:
+  sheet: tbills
+  # verified identical coordinates to EN; values are french_percent_text ("2,23%") not numbers
+  canadian:
+    maturity_cells: ["A15", "C15", "E15", "G15", "I15"]
+    rate_cells: ["A19", "C19", "E19", "G19", "I19"]
+  us:
+    maturity_cells: ["A24", "C24", "E24", "G24", "I24"]
+    rate_cells: ["A28", "C28", "E28", "G28", "I28"]
+  value_format: french_percent_text
+
+cashable_gic:
+  sheet: cashable_term_deposits
+  header_row: 15   # verified identical to EN
+  data_row_start: 17
+  data_row_end: 26
+  issuer_col: "A"
+  code_col: "D"
+  rate_col: "F"
+  value_format: numeric   # verified: numeric Decimal, same as EN (F21 = 0.0175)
+
+term_deposits:
+  sheet: cashable_term_deposits
+  header_row: 30
+  data_row_start: 32
+  data_row_end: 43
+  issuer_col: "A"
+  code_col: "D"
+  buckets: {30: "E", 60: "F", 90: "G", 120: "H", 180: "I", 270: "J"}
+  value_format: numeric
+
+gic_annual:
+  sheet: gic_1yr_5yr
+  header_row: 12
+  data_row_start: 14
+  data_row_end: 25
+  issuer_col: "A"
+  code_col: "D"
+  term_years_cols: {1: "E", 2: "F", 3: "G", 4: "H", 5: "I"}
+  value_format: numeric   # verified identical to EN
+
+gic_compound:
+  sheet: gic_1yr_5yr
+  header_row: 28
+  data_row_start: 30
+  data_row_end: 41
+  issuer_col: "A"
+  code_col: "D"
+  term_years_cols: {1: "E", 2: "F", 3: "G", 4: "H", 5: "I"}
+  value_format: numeric
+
+gic_monthly:
+  sheet: gic_1yr_5yr
+  header_row: 44
+  data_row_start: 46
+  data_row_end: 57
+  issuer_col: "A"
+  code_col: "D"
+  term_years_cols: {1: "E", 2: "F", 3: "G", 4: "H", 5: "I"}
+  value_format: numeric
+
+hisa:
+  sheet: hisa
+  discovery: scan   # row offsets vs EN were not individually confirmed; locate by fund code
+  scan_row_start: 1
+  scan_row_end: 60
+  issuer_col: "A"
+  fund_code_col: "C"
+  yield_col: "H"
+  value_format: french_percent_text   # verified: HISA!H26 = "1,80%" (text), not numeric
+
+money_market_comparison:
+  sheet: money_market_funds
+  status: "BUSINESS_SCOPE_UNCONFIRMED"
+  discovery: scan
+  scan_row_start: 1
+  scan_row_end: 50
+  issuer_col: "A"
+  yield_col: "J"
+  value_format: numeric

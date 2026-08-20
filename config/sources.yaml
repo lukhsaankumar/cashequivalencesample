@@ -1,0 +1,114 @@
+# Source configuration. modes: automatic | manual | hybrid | disabled
+# NOTE: home.investorsgroup.com, digital.lipperweb.com and *.sharepoint.com sources require the
+# IG corporate VPN + authenticated session, which this environment does not have. Their automatic
+# collectors are implemented and will be attempted every run; expect them to fail fast with
+# SOURCE_HTTP_TIMEOUT / SOURCE_AUTH_REQUIRED outside the VPN and fall through to MANUAL_REQUIRED.
+
+sources:
+  template:
+    enabled: true
+    mode: automatic
+    automatic:
+      type: local_file
+      timeout_seconds: 5
+    manual:
+      allowed_types: [xlsx]
+    freshness:
+      maximum_age_days: 3650
+
+  report_date:
+    enabled: true
+    mode: automatic
+    automatic:
+      type: user_input
+    manual:
+      allowed_types: [numeric]
+    freshness:
+      maximum_age_days: 0
+
+  gic_rates:
+    enabled: true
+    mode: hybrid
+    automatic:
+      type: file_watch
+      folder: "local_data/uploads/gic_rates"
+      timeout_seconds: 5
+      retries: 0
+    manual:
+      allowed_types: [xlsx, csv]
+    freshness:
+      maximum_age_days: 14
+
+  canada_prime:
+    enabled: true
+    mode: hybrid
+    automatic:
+      type: official_http
+      # Bank of Canada Valet API, series V80691311 (Canadian bank prime rate)
+      url: "https://www.bankofcanada.ca/valet/observations/V80691311/json?recent=5"
+      timeout_seconds: 20
+      retries: 2
+    manual:
+      allowed_types: [numeric]
+    freshness:
+      maximum_age_days: 14
+
+  us_fed_funds:
+    enabled: true
+    mode: hybrid
+    automatic:
+      type: official_http
+      # FRED (Federal Reserve Bank of St. Louis) - Federal Funds target range bounds
+      url_upper: "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU"
+      url_lower: "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARL"
+      timeout_seconds: 20
+      retries: 2
+      rule: "UPPER_BOUND"
+      rule_status: "UNCONFIRMED_BUSINESS_RULE"
+    manual:
+      allowed_types: [numeric]
+    freshness:
+      maximum_age_days: 14
+
+  money_market:
+    enabled: true
+    mode: hybrid
+    automatic:
+      type: authenticated_http
+      # Lipper fund profile pages, linked from Info.docx. Requires IG VPN + Lipper session.
+      url_cad: "https://digital.lipperweb.com/invgrp/profile?symbol=68317397&lang=en"
+      url_us: "https://digital.lipperweb.com/invgrp/profile?symbol=68002367&lang=en"
+      timeout_seconds: 15
+      retries: 1
+    manual:
+      allowed_types: [numeric]
+    freshness:
+      maximum_age_days: 14
+
+  treasury_bills:
+    enabled: true
+    mode: hybrid
+    automatic:
+      type: file_watch
+      folder: "local_data/uploads/tbills"
+      timeout_seconds: 5
+      retries: 0
+    manual:
+      allowed_types: [pdf, txt]
+    freshness:
+      maximum_age_days: 14
+
+  hisa:
+    enabled: true
+    mode: hybrid
+    automatic:
+      type: authenticated_http
+      # home.investorsgroup.com product pages, linked from Info.docx / Step by Step docx.
+      # Requires IG VPN + authenticated session.
+      url: "https://home.investorsgroup.com/Content/en/products/shortTrm/igEQBHighInterest.shtml"
+      timeout_seconds: 15
+      retries: 1
+    manual:
+      allowed_types: [csv, xlsx, pdf, structured]
+    freshness:
+      maximum_age_days: 14
