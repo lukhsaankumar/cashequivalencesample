@@ -101,3 +101,104 @@ def test_logout_deletes_existing_profile(tmp_path, monkeypatch):
     (profile_dir / "state.json").write_text('{"cookies": [], "origins": []}')
     assert browser_session.logout("igm_default") is True
     assert not profile_dir.exists()
+
+
+class _FakePage:
+    """Scripted (url, content-or-exception) sequence — one entry consumed per content() call."""
+    def __init__(self, script):
+        self._script = list(script)
+        self._idx = 0
+        self.url = script[0][0]
+
+    def goto(self, url, **kw):
+        self.url = url
+
+    def content(self):
+        url, outcome = self._script[min(self._idx, len(self._script) - 1)]
+        self._idx += 1
+        self.url = url
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+class _FakeContext:
+    def __init__(self, page):
+        self._page = page
+        self.storage_state_calls: list[str] = []
+
+    def new_page(self):
+        return self._page
+
+    def storage_state(self, path):
+        self.storage_state_calls.append(path)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('{"cookies": [], "origins": []}')
+
+
+class _FakeBrowser:
+    def __init__(self, context):
+        self._context = context
+        self.closed = False
+
+    def new_context(self):
+        return self._context
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeSyncPlaywrightCM:
+    """Stands in for `with sync_playwright() as p: ...` — p.chromium.launch(...) returns the
+    single scripted fake browser regardless of headless=True/False."""
+    def __init__(self, browser):
+        self._browser = browser
+
+    def __enter__(self):
+        chromium = type("_Chromium", (), {"launch": lambda self_, **kw: self._browser})()
+        return type("_Playwright", (), {"chromium": chromium})()
+
+    def __exit__(self, *exc_info):
+        return False
+
+
+def _install_fake_playwright(monkeypatch, page):
+    import sys
+    import types
+    context = _FakeContext(page)
+    browser = _FakeBrowser(context)
+
+    fake_module = types.ModuleType("playwright.sync_api")
+    fake_module.sync_playwright = lambda: _FakeSyncPlaywrightCM(browser)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
+    if "playwright" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
+    return context, browser
+
+
+def test_interactive_login_survives_transient_content_race_during_sso_redirect(tmp_path, monkeypatch):
+    """Regression test for a real crash: a user hit `Page.content: Unable to retrieve content
+    because the page is navigating and changing the content` mid-SSO-redirect — interactive_login
+    used to let that exception propagate and crash the whole login flow instead of just retrying
+    on the next poll tick."""
+    monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
+    monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
+    monkeypatch.setattr(browser_session.time, "sleep", lambda s: None)
+
+    login_url = "https://login.microsoftonline.com/tenant/oauth2/authorize"
+    real_url = "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
+    script = [
+        (login_url, "<html>sign in</html>"),
+        (login_url, RuntimeError("Page.content: Unable to retrieve content because the page is "
+                                  "navigating and changing the content.")),
+        (real_url, "<html>real content, signed in</html>"),
+    ]
+    page = _FakePage(script)
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    ok = browser_session.interactive_login("igm_default", real_url, timeout_seconds=30)
+
+    assert ok is True
+    assert browser.closed is True
+    assert context.storage_state_calls  # session was saved
+    assert browser_session.has_profile("igm_default") is True

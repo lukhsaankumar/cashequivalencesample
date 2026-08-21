@@ -104,7 +104,22 @@ def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 
         page.goto(start_url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
-            if not is_login_page(page.url, page.content()):
+            try:
+                # Read content() first, then url — page.url is a live property while content()
+                # takes a moment to resolve, so reading url second keeps both readings closer to
+                # the same navigation state instead of interleaving a stale url with fresh content
+                # (or vice versa) if a navigation completes in between the two reads.
+                html = page.content()
+                current_url = page.url
+            except Exception:
+                # An SSO sign-in involves several navigation hops (home.investorsgroup.com ->
+                # login.microsoftonline.com -> back); polling page.content() can transiently race
+                # a navigation in progress ("page is navigating and changing the content") right
+                # as the user finishes signing in. Not a real failure — just means the poll landed
+                # mid-hop; try again next tick instead of crashing the whole login flow.
+                time.sleep(2)
+                continue
+            if not is_login_page(current_url, html):
                 signed_in = True
                 break
             time.sleep(2)
