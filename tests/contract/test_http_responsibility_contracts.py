@@ -98,9 +98,6 @@ def test_automatic_transient_failure_falls_back_to_manual_required(monkeypatch, 
 @pytest.mark.parametrize("resp_cls,responsibility_id,fake_responses", SCENARIOS)
 def test_automatic_permanent_failure_403_falls_back_to_manual_required(monkeypatch, tmp_path, resp_cls,
                                                                          responsibility_id, fake_responses):
-    if responsibility_id == "money_market":
-        pytest.skip("money_market classifies all connection failures as SOURCE_AUTH_REQUIRED, not per-status-code")
-
     def raise_403(url, **kw):
         return _FakeResponse(status_code=403)
     monkeypatch.setattr(httpx, "get", raise_403)
@@ -111,6 +108,51 @@ def test_automatic_permanent_failure_403_falls_back_to_manual_required(monkeypat
     errors = ctx.db.get_errors(ctx.run_id, responsibility_id)
     assert errors[-1].error_code == "SOURCE_HTTP_403"
     assert errors[-1].retryable is False
+
+
+@pytest.mark.parametrize("resp_cls,responsibility_id,fake_responses", SCENARIOS)
+def test_automatic_permanent_failure_401_falls_back_to_manual_required(monkeypatch, tmp_path, resp_cls,
+                                                                         responsibility_id, fake_responses):
+    # Regression test: a 401 (e.g. an unauthenticated SharePoint/SSO request) was previously
+    # misclassified as SOURCE_HTTP_TIMEOUT/retryable=True — found via a real corporate-network
+    # debug bundle, not a synthetic test. See collectors/http.py: classify_http_exception.
+    def raise_401(url, **kw):
+        return _FakeResponse(status_code=401)
+    monkeypatch.setattr(httpx, "get", raise_401)
+    resp = resp_cls()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+    assert status == ResponsibilityStatus.MANUAL_REQUIRED
+    errors = ctx.db.get_errors(ctx.run_id, responsibility_id)
+    assert errors[-1].error_code == "SOURCE_HTTP_401"
+    assert errors[-1].retryable is False
+
+
+def test_money_market_yield_not_found_saves_debug_html_and_requires_manual(tmp_path, monkeypatch):
+    """The page loads fine (200 OK, no exception) but doesn't contain the expected 'current
+    yield' text — most likely a login redirect, distinct from a network/TLS failure. Must save
+    the actual HTML for diagnosis rather than fail silently or misreport as a connection issue."""
+    def fake_get(url, **kw):
+        return _FakeResponse(text_body="<html><body>Please sign in to continue</body></html>")
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    resp = MoneyMarketResponsibility()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+
+    assert status == ResponsibilityStatus.MANUAL_REQUIRED
+    errors = ctx.db.get_errors(ctx.run_id, "money_market")
+    assert errors[-1].error_code == "SOURCE_LAYOUT_CHANGED"
+    assert "saved to" in errors[-1].message
+
+    import re
+    saved_path_match = re.search(r"saved to (\S+)\.", errors[-1].message)
+    assert saved_path_match, errors[-1].message
+    from pathlib import Path
+    saved_path = Path(saved_path_match.group(1))
+    assert saved_path.exists()
+    assert "sign in" in saved_path.read_text(encoding="utf-8")
+    saved_path.unlink()  # cleanup — this writes outside tmp_path, into raw_sources_dir()
 
 
 def test_canada_prime_manual_fallback_accepted(tmp_path):

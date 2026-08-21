@@ -59,7 +59,11 @@ def test_money_market_empty_html_result(monkeypatch, tmp_path):
 
     assert status == ResponsibilityStatus.MANUAL_REQUIRED
     errors = ctx.db.get_errors(ctx.run_id, "money_market")
-    assert errors[-1].error_code == "SOURCE_AUTH_REQUIRED"
+    # The page loaded fine (no connection/TLS/auth-status error) but didn't contain the expected
+    # "current yield" text — that's a layout/content mismatch, not a connection failure, and is
+    # now classified as such (see collectors/http.py's save_debug_html — the real HTML also gets
+    # saved to disk for diagnosis, verified separately in test_http_responsibility_contracts.py).
+    assert errors[-1].error_code == "SOURCE_LAYOUT_CHANGED"
     assert "current yield" in errors[-1].message.lower()
 
 

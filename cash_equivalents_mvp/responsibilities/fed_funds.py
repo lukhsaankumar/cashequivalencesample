@@ -10,6 +10,7 @@ from datetime import datetime
 
 import httpx
 
+from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
 from cash_equivalents_mvp.models import (
     CollectionResult,
     ManualInput,
@@ -47,21 +48,11 @@ class FedFundsResponsibility(Responsibility):
             lower_resp = httpx.get(cfg["url_lower"], timeout=timeout, follow_redirects=True)
             upper_resp.raise_for_status()
             lower_resp.raise_for_status()
-        except httpx.TimeoutException as exc:
-            err = ResponsibilityError(run_id=context.run_id, responsibility_id=self.responsibility_id,
-                                       stage="collect_automatic", error_code="SOURCE_HTTP_TIMEOUT",
-                                       retryable=True, message=str(exc))
-            return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)
-        except httpx.HTTPStatusError as exc:
-            code = "SOURCE_HTTP_403" if exc.response.status_code == 403 else "SOURCE_HTTP_TIMEOUT"
-            err = ResponsibilityError(run_id=context.run_id, responsibility_id=self.responsibility_id,
-                                       stage="collect_automatic", error_code=code,
-                                       retryable=(code != "SOURCE_HTTP_403"), message=str(exc))
-            return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)
         except Exception as exc:
+            code, retryable = classify_http_exception(exc)
             err = ResponsibilityError(run_id=context.run_id, responsibility_id=self.responsibility_id,
-                                       stage="collect_automatic", error_code="SOURCE_HTTP_TIMEOUT",
-                                       retryable=True, message=f"FRED request failed: {exc}")
+                                       stage="collect_automatic", error_code=code, retryable=retryable,
+                                       message=f"FRED request failed: {describe_failure(cfg.get('url_upper', ''), exc)}")
             return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)
 
         upper = _latest_fred_value(upper_resp.text)

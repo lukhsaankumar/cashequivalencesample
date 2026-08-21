@@ -154,4 +154,16 @@ def test_product_page_with_no_matching_link_logs_layout_changed_warning(monkeypa
     resp.run_automatic(ctx)
 
     errors = ctx.db.get_errors(ctx.run_id, "gic_rates")
-    assert any(e.error_code == "SOURCE_LAYOUT_CHANGED" for e in errors)
+    layout_error = next((e for e in errors if e.error_code == "SOURCE_LAYOUT_CHANGED"), None)
+    assert layout_error is not None
+
+    # The actual HTML must be saved for diagnosis, not just described in the message — this is
+    # what turns a repeat "no link found" failure into something we can actually look at.
+    import re
+    from pathlib import Path
+    saved_path_match = re.search(r"saved to (\S+) for inspection", layout_error.message)
+    assert saved_path_match, layout_error.message
+    saved_path = Path(saved_path_match.group(1))
+    assert saved_path.exists()
+    assert "Nothing useful here" in saved_path.read_text(encoding="utf-8")
+    saved_path.unlink()  # cleanup — this writes outside tmp_path, into raw_sources_dir()

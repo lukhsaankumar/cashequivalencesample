@@ -33,7 +33,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from cash_equivalents_mvp.audit import sha256_file
-from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
+from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure, save_debug_html
 from cash_equivalents_mvp.config import raw_sources_dir, source_material_dir, workbook_map
 from cash_equivalents_mvp.models import (
     CollectionResult,
@@ -117,10 +117,17 @@ class GicRatesResponsibility(Responsibility):
             if "gic" in text and "rate" in text:
                 return urljoin(page_url, href)
 
+        # No matching link — save the actual HTML instead of just guessing why next time. Whoever
+        # is diagnosing this (see docs/debugging.md) can open this file directly to see exactly
+        # what the page returned (a real product page with a differently-labeled link? a login
+        # redirect? something JS-rendered with no links in the raw HTML at all?) instead of us
+        # re-guessing blind at the link-matching heuristic below.
+        debug_path = save_debug_html(context.run_id, "gic_product_page", resp.text)
         self._record_error(
             context, "collect_automatic", "SOURCE_LAYOUT_CHANGED",
             f"No GIC rates link found on {page_url} — page layout may have changed, or this page "
-            f"requires an authenticated session to show its real content.",
+            f"requires an authenticated session to show its real content. Actual response saved "
+            f"to {debug_path} for inspection.",
             severity="warning",
         )
         return None

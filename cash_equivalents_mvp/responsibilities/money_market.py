@@ -12,6 +12,7 @@ from datetime import datetime
 import httpx
 from bs4 import BeautifulSoup
 
+from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure, save_debug_html
 from cash_equivalents_mvp.models import (
     CollectionResult,
     ManualInput,
@@ -48,21 +49,29 @@ class MoneyMarketResponsibility(Responsibility):
             try:
                 resp = httpx.get(url, timeout=timeout, follow_redirects=True)
                 resp.raise_for_status()
-                yield_str = _extract_current_yield(resp.text)
-                if yield_str is None:
-                    raise ValueError("current yield field not found on page")
-                results[currency] = yield_str
-            except httpx.TimeoutException as exc:
-                err = ResponsibilityError(run_id=context.run_id, responsibility_id=self.responsibility_id,
-                                           stage="collect_automatic", error_code="SOURCE_HTTP_TIMEOUT",
-                                           retryable=True, message=f"{currency} fund page timed out: {exc}")
-                return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)
             except Exception as exc:
+                code, retryable = classify_http_exception(exc)
                 err = ResponsibilityError(run_id=context.run_id, responsibility_id=self.responsibility_id,
-                                           stage="collect_automatic", error_code="SOURCE_AUTH_REQUIRED",
-                                           message=f"{currency} fund page unreachable (likely requires IG VPN "
-                                                   f"+ authenticated Lipper session): {exc}")
+                                           stage="collect_automatic", error_code=code, retryable=retryable,
+                                           message=f"{currency} fund page: {describe_failure(url, exc)}")
                 return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)
+
+            yield_str = _extract_current_yield(resp.text)
+            if yield_str is None:
+                # The page loaded fine (200, no exception) but didn't contain what we expected —
+                # most likely a login redirect (not authenticated to Lipper specifically, distinct
+                # from VPN connectivity) or the real page uses different wording than our regex
+                # assumes. Save the actual HTML so this is diagnosable instead of a repeat guess.
+                debug_path = save_debug_html(context.run_id, f"lipper_{currency.lower()}", resp.text)
+                err = ResponsibilityError(
+                    run_id=context.run_id, responsibility_id=self.responsibility_id,
+                    stage="collect_automatic", error_code="SOURCE_LAYOUT_CHANGED",
+                    message=f"{currency} fund page ({url}) loaded but 'current yield' text was not "
+                            f"found — likely not authenticated to Lipper, or the page layout differs "
+                            f"from what's expected. Actual response saved to {debug_path}.",
+                )
+                return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)
+            results[currency] = yield_str
 
         artifact = SourceArtifact(
             run_id=context.run_id, responsibility_id=self.responsibility_id,
