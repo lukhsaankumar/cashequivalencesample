@@ -10,13 +10,16 @@ source files. Treat everything under `source_material/` and `local_data/` as con
   else touches SMTP, Graph, or any mail transport. `responsibilities/package.py`'s `validate()`
   fails the run if any of those headers are non-empty.
 - **Never bypasses authentication.** Sources behind the IG VPN / SSO (`home.investorsgroup.com`,
-  `digital.lipperweb.com`, `*.sharepoint.com`) are attempted with a plain HTTP GET; if that fails,
-  the responsibility falls through to `MANUAL_REQUIRED`. No credential is stored, guessed, or
-  brute-forced.
-- **Never stores credentials in the repo, database, or logs.** There are currently no credentialed
-  sources configured (`config/sources.yaml` only lists unauthenticated endpoints and file-watch
-  folders). If a future production deployment adds one, `config.py` deliberately has no
-  credential-loading path — see `docs/production_backlog.md`.
+  `digital.lipperweb.com`, `*.sharepoint.com`) are attempted with a plain HTTP GET first; if that
+  fails, an *optional* persistent browser session may be used instead (see below) — but that
+  session only ever exists because the user personally, interactively signed in through a real
+  login page. If neither is available, the responsibility falls through to `MANUAL_REQUIRED`. No
+  credential is stored, guessed, autofilled, or brute-forced by this application at any point.
+- **Never stores credentials in the repo, database, or logs.** `config/sources.yaml` lists only
+  unauthenticated endpoints and file-watch folders; `config.py` deliberately has no
+  credential-loading path — see `docs/production_backlog.md`. The one piece of session state this
+  app can persist locally — browser cookies from a user-initiated login, see below — is not a
+  credential (it contains no password or MFA secret) and is covered in its own section.
 - **Never uploads report content to a third party.** No analytics, no telemetry, no crash
   reporting, no AI/LLM call is made with source or output data at runtime.
 
@@ -56,8 +59,12 @@ SHA-256 of the file it came from. Overrides without a reason are rejected with
 `.pdf`/`.csv`/`.eml` from version control. To clear all confidential local state between sessions:
 
 ```powershell
-Remove-Item -Recurse -Force local_data\runs\*, local_data\uploads\*, local_data\raw_sources\*, local_data\database\*, local_data\logs\*
+Remove-Item -Recurse -Force local_data\runs\*, local_data\uploads\*, local_data\raw_sources\*, local_data\database\*, local_data\logs\*, local_data\browser_profiles\*
 ```
+
+(`local_data\browser_profiles\*` holds saved SSO session cookies — see "Persistent authenticated
+browser sessions" below; clearing it signs out every saved profile and is equivalent to running
+`cli browser-logout` for each one.)
 
 (`source_material/` is left untouched — it's the read-only approved template/source set, not
 run-generated state.)
@@ -94,6 +101,58 @@ If a source still fails after installing `pip-system-certs`, the corporate proxy
 blocking or redirecting that specific domain outright (not just re-signing it) — that needs an
 IT-side allowlist change, not a client-side fix, and will still correctly fall through to a
 manual upload in the meantime.
+
+## Persistent authenticated browser sessions (SSO-gated sources, opt-in)
+
+`gic_rates`, `money_market`, `hisa`, and `treasury_bills` are, per real captured evidence (a
+`cli diagnose` debug bundle), genuinely gated by interactive corporate SSO — not a scraper bug. The
+GIC product page redirects an unauthenticated request to a real Microsoft/Entra ID login page
+(captured markers included `"sCompanyDisplayName":"IGMFinancial"` and a
+`Shibboleth.sso/SAML2/POST` SAML redirect); no amount of header/regex tuning gets a plain
+`httpx.get()` past that. `collectors/browser_session.py` (Playwright, optional — `pip install
+-e ".[browser-auth]"` then `playwright install chromium`) adds a way past it that stays inside
+every constraint above:
+
+**What actually happens, step by step:**
+1. You run `python -m cash_equivalents_mvp.cli browser-login --source gic_rates` (or any other
+   configured source). This opens a normal, **visible** Chromium window at that source's real
+   login-protected page.
+2. You sign in yourself — username, password, MFA prompt — exactly as you would in your everyday
+   browser. This app never sees, touches, or stores any of it; you're typing directly into
+   Microsoft's / the source's own real login form, rendered by a real browser engine.
+3. Once you're past the login page, the app detects it (by URL/content — the same login markers
+   captured from the real debug bundle) and closes the window. Playwright's persistent browser
+   profile has already written the resulting **session cookies** to
+   `local_data/browser_profiles/<profile>/` as you browsed — nothing extra is extracted or copied.
+4. Automated runs afterward reuse those cookies (`collectors/browser_session.py:
+   authenticated_client` / `render_authenticated_page`) to make requests as your already-signed-in
+   session — the same thing your browser does every time you reopen a tab without re-entering your
+   password. If the session has expired, the source correctly reports
+   `SOURCE_BROWSER_SESSION_EXPIRED` and falls through to the next tier / `MANUAL_REQUIRED`, telling
+   you to run `browser-login` again — it never tries to re-authenticate on its own.
+
+**Why this doesn't violate "never bypasses authentication":** authentication still happens, in
+full, every single time a session needs to be established or refreshed — by you, interactively, in
+a real login form you can see. The app can reuse a session you already created; it cannot create
+one, extend one past its natural expiry, or get past a login page on its own.
+
+**What's stored locally, and what isn't:**
+- Stored: session cookies and local storage for whatever site(s) you visited during that
+  interactive login — the same category of data any browser profile holds after "stay signed in".
+- Never stored: your password, MFA code/secret, or anything else you typed into the login form.
+  It went straight into the real site's own login form and never passed through this
+  application's code at all.
+- `local_data/browser_profiles/` is under `local_data/`, already fully excluded by `.gitignore`
+  (see "Local data hygiene" above) and included in that section's cleanup command.
+
+**To revoke a session:** `cli browser-logout --profile igm_default` deletes the saved profile
+directory outright (equivalent to signing out everywhere / clearing that browser profile). Do this
+before handing off a machine, or any time you want to force a fresh interactive sign-in.
+
+**Fully opt-in:** nothing above runs unless you explicitly install the `browser-auth` extra and run
+`cli browser-login` yourself. Every responsibility's existing plain-HTTP and file-based tiers are
+completely unaffected if you never do either — `config/sources.yaml`'s `browser_profile` keys are
+inert until a matching profile actually exists on disk.
 
 ## Known gaps (tracked, not silently ignored)
 

@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 
 from cash_equivalents_mvp.audit import sha256_file
+from cash_equivalents_mvp.collectors import browser_session
 from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
 from cash_equivalents_mvp.config import resolve_sheet_name, settings, source_material_dir, workbook_map
 from cash_equivalents_mvp.models import (
@@ -57,12 +58,23 @@ class HisaResponsibility(Responsibility):
     def collect_automatic(self, context: RunContext) -> CollectionResult:
         cfg = context.source_config(self.responsibility_id).get("automatic", {})
         url = cfg.get("url")
+        timeout = cfg.get("timeout_seconds", 15)
+        browser_profile = cfg.get("browser_profile")
+
+        get_fn = httpx.get
+        client = None
+        if browser_profile:
+            client = browser_session.authenticated_client(browser_profile, timeout)
+            if client is not None:
+                get_fn = client.get
+
         try:
-            resp = httpx.get(url, timeout=cfg.get("timeout_seconds", 15), follow_redirects=True)
+            resp = get_fn(url, timeout=timeout, follow_redirects=True)
             resp.raise_for_status()
             # The product page is a single-product marketing page, not a machine-readable roster —
-            # reaching it at all only proves VPN/network connectivity, not that we could scrape the
-            # full ~30-provider table from it. Fall through to the structured-file paths below.
+            # reaching it at all only proves VPN/network (or, with a browser session, SSO)
+            # connectivity, not that we could scrape the full ~30-provider table from it. Fall
+            # through to the structured-file paths below either way.
         except Exception as exc:
             # Logged as a non-fatal warning (not returned as a failure) — HISA still has real
             # file-based fallback tiers below, unlike money_market. This is what makes the real
@@ -70,6 +82,9 @@ class HisaResponsibility(Responsibility):
             code, retryable = classify_http_exception(exc)
             self._record_error(context, "collect_automatic", code, describe_failure(url, exc),
                                 severity="warning", retryable=retryable, exc=exc)
+        finally:
+            if client is not None:
+                client.close()
 
         folder = Path(context.settings()["upload_dir"]) / "hisa"
         csv_candidates = sorted(folder.glob("*.csv")) if folder.exists() else []

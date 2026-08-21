@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 
 from cash_equivalents_mvp.audit import sha256_file
+from cash_equivalents_mvp.collectors import browser_session
 from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
 from cash_equivalents_mvp.config import source_material_dir
 from cash_equivalents_mvp.models import (
@@ -42,14 +43,25 @@ class TreasuryBillsResponsibility(Responsibility):
     def collect_automatic(self, context: RunContext) -> CollectionResult:
         cfg = context.source_config(self.responsibility_id).get("automatic", {})
         url = cfg.get("url")
+        timeout = cfg.get("timeout_seconds", 15)
+        browser_profile = cfg.get("browser_profile")
         if url:
+            get_fn = httpx.get
+            client = None
+            if browser_profile:
+                client = browser_session.authenticated_client(browser_profile, timeout)
+                if client is not None:
+                    get_fn = client.get
             try:
-                resp = httpx.get(url, timeout=cfg.get("timeout_seconds", 15), follow_redirects=True)
+                resp = get_fn(url, timeout=timeout, follow_redirects=True)
                 resp.raise_for_status()
             except Exception as exc:
                 code, retryable = classify_http_exception(exc)
                 self._record_error(context, "collect_automatic", code, describe_failure(url, exc),
                                     severity="warning", retryable=retryable, exc=exc)
+            finally:
+                if client is not None:
+                    client.close()
 
         folder = Path(cfg.get("folder", "local_data/uploads/tbills"))
         candidates = sorted(folder.glob("*.pdf")) if folder.exists() else []

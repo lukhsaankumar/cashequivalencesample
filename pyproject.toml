@@ -34,6 +34,12 @@ windows = ["pywin32>=306"]
 # already has the corporate root CA, via Group Policy) instead of only the bundled `certifi` list.
 # See SECURITY.md.
 corp-network = ["pip-system-certs>=4.0"]
+# For sources genuinely gated by interactive SSO (confirmed via a real captured Microsoft/Entra ID
+# login redirect — see collectors/browser_session.py) where a plain HTTP request can never
+# succeed. After installing, also run `playwright install chromium` once to fetch the browser
+# binary, then `cli browser-login --source <id>` to sign in interactively (see SECURITY.md — no
+# password/MFA material is ever stored by this app, only the resulting session cookies).
+browser-auth = ["playwright>=1.42"]
 
 [build-system]
 requires = ["setuptools>=68"]

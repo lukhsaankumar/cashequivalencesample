@@ -8,6 +8,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from cash_equivalents_mvp.collectors import browser_session
 from cash_equivalents_mvp.config import source_material_dir
 from cash_equivalents_mvp.database import Database
 from cash_equivalents_mvp.models import ResponsibilityStatus
@@ -23,11 +24,12 @@ class _FakeResponse:
     # Plain __init__-based class (not a class nested in a function with `attr = attr` in its
     # body) — a class body does NOT close over its enclosing function's locals the way a nested
     # function does, so `content = content` inside a function-local class raises NameError.
-    def __init__(self, *, content: bytes, content_type: str, text: str | None = None):
+    def __init__(self, *, content: bytes, content_type: str, text: str | None = None, url: str = ""):
         self.status_code = 200
         self.headers = {"content-type": content_type}
         self.content = content
         self.text = text if text is not None else content.decode(errors="replace")
+        self.url = url  # real httpx.Response always has this; browser-session detection reads it
 
     def raise_for_status(self):
         pass
@@ -167,3 +169,97 @@ def test_product_page_with_no_matching_link_logs_layout_changed_warning(monkeypa
     assert saved_path.exists()
     assert "Nothing useful here" in saved_path.read_text(encoding="utf-8")
     saved_path.unlink()  # cleanup — this writes outside tmp_path, into raw_sources_dir()
+
+
+class _FakeAuthenticatedClient:
+    """Stand-in for the httpx.Client returned by browser_session.authenticated_client — same
+    .get(url, timeout=, follow_redirects=)/.close() shape, keyed responses by exact URL."""
+    def __init__(self, responses: dict):
+        self._responses = responses
+        self.calls: list[str] = []
+        self.closed = False
+
+    def get(self, url, **kw):
+        self.calls.append(url)
+        return self._responses[url]
+
+    def close(self):
+        self.closed = True
+
+
+def test_browser_session_tried_first_when_profile_configured(monkeypatch, tmp_path):
+    """config/sources.yaml sets gic_rates.automatic.browser_profile — when a saved session exists
+    (cli browser-login was run), it must be used for every request in tiers 1-2 in preference to
+    plain httpx.get, since a real debug bundle proved plain httpx can never get past this
+    source's SSO wall at all."""
+    real_gic_file = source_material_dir() / "GIC Rates.xlsx"
+    if not real_gic_file.exists():
+        pytest.skip("source_material/GIC Rates.xlsx not present")
+    real_bytes = real_gic_file.read_bytes()
+
+    product_url = "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
+    xlsx_url = "https://home.investorsgroup.com/Content/en/products/pr/current-gic-rates.xlsx"
+    product_page_html = f'<html><body><a href="{xlsx_url}">Current GIC Rates</a></body></html>'
+
+    fake_client = _FakeAuthenticatedClient({
+        product_url: _fake_html_login_response(product_page_html),
+        xlsx_url: _fake_xlsx_response(content=real_bytes),
+    })
+
+    def fail_plain_http(url, **kw):
+        raise AssertionError(f"plain httpx.get must not be called when a browser session is available: {url}")
+    monkeypatch.setattr(httpx, "get", fail_plain_http)
+    monkeypatch.setattr(browser_session, "has_profile", lambda name: True)
+    monkeypatch.setattr(browser_session, "authenticated_client", lambda profile, timeout: fake_client)
+
+    resp = GicRatesResponsibility()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+
+    assert status == ResponsibilityStatus.COMPLETE
+    assert fake_client.calls == [product_url, xlsx_url]
+    assert fake_client.closed is True
+    artifacts = ctx.db.get_artifacts(ctx.run_id)
+    web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
+    assert web_artifact.collection_method == "web_scraped_authenticated"
+
+
+def test_browser_session_expired_falls_through_to_sharepoint_via_plain_http(monkeypatch, tmp_path):
+    """A saved session that no longer works (e.g. it expired since the last browser-login) must
+    be reported as SOURCE_BROWSER_SESSION_EXPIRED, not a generic auth/layout error, and every
+    remaining tier must fall back to plain httpx rather than retrying the same dead session."""
+    real_gic_file = source_material_dir() / "GIC Rates.xlsx"
+    if not real_gic_file.exists():
+        pytest.skip("source_material/GIC Rates.xlsx not present")
+    real_bytes = real_gic_file.read_bytes()
+
+    product_url = "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
+    sharepoint_url = ("https://446346262425.sharepoint.com/:x:/r/teams/IG-Portfolio-Strategist/"
+                       "Shared%20Documents/Cash%20and%20equivalents/Mike%27s%20Folder/GIC%20Rates.xlsx"
+                       "?d=w3963642ba08c4bae8190dad1a4ae884a&csf=1&web=1&e=pcDvdc")
+
+    login_resp = _fake_html_login_response(
+        '<script>var $Config={"sCompanyDisplayName":"IGMFinancial"};</script>'
+    )
+    login_resp.url = "https://login.microsoftonline.com/tenant/oauth2/authorize"
+    fake_client = _FakeAuthenticatedClient({product_url: login_resp})
+
+    def fake_plain_get(url, **kw):
+        if url == sharepoint_url:
+            return _fake_xlsx_response(content=real_bytes)
+        raise AssertionError(f"unexpected plain httpx.get call: {url}")
+    monkeypatch.setattr(httpx, "get", fake_plain_get)
+    monkeypatch.setattr(browser_session, "has_profile", lambda name: True)
+    monkeypatch.setattr(browser_session, "authenticated_client", lambda profile, timeout: fake_client)
+
+    resp = GicRatesResponsibility()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+
+    assert status == ResponsibilityStatus.COMPLETE
+    errors = ctx.db.get_errors(ctx.run_id, "gic_rates")
+    assert any(e.error_code == "SOURCE_BROWSER_SESSION_EXPIRED" and e.severity == "warning" for e in errors)
+    assert fake_client.calls == [product_url]  # never retried against sharepoint with the dead session
+    artifacts = ctx.db.get_artifacts(ctx.run_id)
+    web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
+    assert web_artifact.collection_method == "sharepoint_direct_fallback"  # not the _authenticated variant

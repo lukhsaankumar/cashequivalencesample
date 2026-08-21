@@ -9,8 +9,9 @@ from pathlib import Path
 from cash_equivalents_mvp.config import (
     database_path,
     output_root_dir,
-    settings,
     source_material_dir,
+    sources_config,
+    settings,
     upload_dir,
 )
 from cash_equivalents_mvp.database import Database
@@ -180,6 +181,58 @@ def cmd_demo(_args) -> int:
     return 0
 
 
+def _resolve_browser_profile_and_url(args) -> tuple[str, str]:
+    """--source <responsibility_id> resolves profile+URL from config/sources.yaml; --profile/--url
+    override or supply them directly for sources with no configured browser_profile yet."""
+    profile, url = args.profile, args.url
+    if args.source:
+        cfg = sources_config().get(args.source, {})
+        auto_cfg = cfg.get("automatic", {})
+        profile = profile or auto_cfg.get("browser_profile")
+        url = url or auto_cfg.get("product_page_url") or auto_cfg.get("url") or auto_cfg.get("url_cad") \
+            or cfg.get("reference_url")
+        if not profile:
+            print(f"{args.source!r} has no automatic.browser_profile configured in "
+                  f"config/sources.yaml — pass --profile explicitly.")
+            sys.exit(2)
+    if not profile or not url:
+        print("Need either --source <responsibility_id> or both --profile and --url.")
+        sys.exit(2)
+    return profile, url
+
+
+def cmd_browser_login(args) -> int:
+    from cash_equivalents_mvp.collectors import browser_session
+    profile, url = _resolve_browser_profile_and_url(args)
+    ok = browser_session.interactive_login(profile, url, timeout_seconds=args.timeout)
+    return 0 if ok else 1
+
+
+def cmd_browser_logout(args) -> int:
+    from cash_equivalents_mvp.collectors import browser_session
+    if browser_session.logout(args.profile):
+        print(f"Session cleared for profile {args.profile!r}.")
+    else:
+        print(f"No saved session found for profile {args.profile!r}.")
+    return 0
+
+
+def cmd_browser_status(_args) -> int:
+    from cash_equivalents_mvp.collectors import browser_session
+    profiles: dict[str, list[str]] = {}
+    for rid, cfg in sources_config().items():
+        p = cfg.get("automatic", {}).get("browser_profile")
+        if p:
+            profiles.setdefault(p, []).append(rid)
+    if not profiles:
+        print("No source in config/sources.yaml has automatic.browser_profile configured.")
+        return 0
+    for profile, sources in profiles.items():
+        state = "LOGGED IN (session saved)" if browser_session.has_profile(profile) else "not signed in"
+        print(f"{profile:20s} {state:28s} used by: {', '.join(sources)}")
+    return 0
+
+
 def _print_states(db: Database, run_id: str) -> None:
     states = db.all_responsibility_states(run_id)
     for rid in topological_order():
@@ -221,6 +274,22 @@ def main() -> int:
     p.set_defaults(func=cmd_diagnose)
 
     sub.add_parser("demo").set_defaults(func=cmd_demo)
+
+    p = sub.add_parser("browser-login", help="One-time interactive sign-in for an SSO-gated "
+                        "source, saved as a persistent local session (see SECURITY.md).")
+    p.add_argument("--source", default=None, help="Responsibility id, e.g. gic_rates — resolves "
+                    "profile+URL from config/sources.yaml")
+    p.add_argument("--profile", default=None, help="Override/explicit profile name")
+    p.add_argument("--url", default=None, help="Override/explicit URL to open")
+    p.add_argument("--timeout", type=int, default=300, help="Seconds to wait for sign-in")
+    p.set_defaults(func=cmd_browser_login)
+
+    p = sub.add_parser("browser-logout", help="Delete a saved browser session (sign out).")
+    p.add_argument("--profile", required=True)
+    p.set_defaults(func=cmd_browser_logout)
+
+    sub.add_parser("browser-status", help="List configured browser profiles and whether each is "
+                    "currently signed in.").set_defaults(func=cmd_browser_status)
 
     args = parser.parse_args()
     return args.func(args)

@@ -3,6 +3,7 @@ source_material_dir: "source_material"
 output_dir: "local_data/runs"
 upload_dir: "local_data/uploads"
 raw_sources_dir: "local_data/raw_sources"
+browser_profile_dir: "local_data/browser_profiles"
 database_path: "local_data/database/app.db"
 log_dir: "local_data/logs"
 

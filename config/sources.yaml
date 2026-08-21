@@ -12,6 +12,14 @@
 # (SOURCE_HTTP_TIMEOUT / SOURCE_AUTH_REQUIRED / a TLS error) and fall through to the next tier.
 # Manual upload is the last resort, never the first choice — every automatic tier below is tried
 # before a responsibility is marked MANUAL_REQUIRED.
+#
+# `browser_profile`, where set, names a persistent Playwright session (see
+# collectors/browser_session.py and SECURITY.md) tried BEFORE the plain-HTTP tiers below. A real
+# debug bundle proved home.investorsgroup.com redirects an unauthenticated request straight to
+# Microsoft/Entra ID SSO — no plain-HTTP tuning gets past that; a saved session (created once via
+# `cli browser-login --source <id>`, an interactive sign-in the user does themselves) is the only
+# way. Purely additive and opt-in: if `cli browser-login` has never been run for a profile, every
+# collector below behaves exactly as if this line weren't here.
 
 sources:
   template:
@@ -49,6 +57,7 @@ sources:
       # Tier 4: source_material/ historical-demo fixture.
       sharepoint_url: "https://446346262425.sharepoint.com/:x:/r/teams/IG-Portfolio-Strategist/Shared%20Documents/Cash%20and%20equivalents/Mike%27s%20Folder/GIC%20Rates.xlsx?d=w3963642ba08c4bae8190dad1a4ae884a&csf=1&web=1&e=pcDvdc"
       product_page_url: "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
+      browser_profile: "igm_default"
       folder: "local_data/uploads/gic_rates"
       timeout_seconds: 15
       retries: 0
@@ -100,6 +109,11 @@ sources:
       # Lipper fund profile pages, linked from Info.docx. Requires IG VPN + Lipper session.
       url_cad: "https://digital.lipperweb.com/invgrp/profile?symbol=68317397&lang=en"
       url_us: "https://digital.lipperweb.com/invgrp/profile?symbol=68002367&lang=en"
+      # A real debug bundle showed this page returns genuine Lipper content (not a login
+      # redirect) but with no percentage value anywhere in the raw server HTML — consistent with
+      # the yield being populated client-side after load. browser_profile here renders the page
+      # with JS executed instead of a raw GET; see money_market.py's collect_automatic docstring.
+      browser_profile: "igm_default"
       timeout_seconds: 15
       retries: 1
     manual:
@@ -118,6 +132,7 @@ sources:
       # the live attempt is still made every run so the real failure reason (not just "we didn't
       # try") is captured and visible in the debug bundle, then falls through to file_watch.
       url: "https://www.nbin.ca/cmst/site/index.jhtml?navid=814"
+      browser_profile: "igm_default"
       folder: "local_data/uploads/tbills"
       timeout_seconds: 15
       retries: 0
@@ -135,6 +150,7 @@ sources:
       # home.investorsgroup.com product pages, linked from Info.docx / Step by Step docx.
       # Requires IG VPN + authenticated session.
       url: "https://home.investorsgroup.com/Content/en/products/shortTrm/igEQBHighInterest.shtml"
+      browser_profile: "igm_default"
       timeout_seconds: 15
       retries: 1
     manual:

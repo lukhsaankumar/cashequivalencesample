@@ -3,6 +3,12 @@
 Automatic collection order — dynamic web pull first, file/fixture fallback only if that fails
 for a reason outside our control (per master prompt §7.3, and because GIC rates change often
 enough that a stale historical fixture is a worse default than a live pull):
+  0. If a persistent browser session has been set up for this source (`cli browser-login
+     --source gic_rates` — see collectors/browser_session.py), use its saved cookies for every
+     request in tiers 1-2 below. A real debug bundle proved gic-tca.shtml redirects an
+     unauthenticated request straight to Microsoft/Entra ID SSO — a plain httpx.get() cannot
+     get past that no matter how it's tuned; this is the only way past it. Purely additive: if no
+     browser profile has ever been created, every request below is identical to before.
   1. Fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml, linked from
      "Step by Step Cash And Equivalents.docx") and scrape it for a link to the current rate file,
      then download and parse that. Tried *first*, not as a fallback, because it's re-discovered
@@ -21,18 +27,22 @@ enough that a stale historical fixture is a worse default than a live pull):
 
 Every failed tier logs the real reason (severity="warning", non-fatal) via
 collectors.http.classify_http_exception so the actual cause (TLS trust, auth redirect, timeout,
-layout change) is visible in the debug bundle / `cli diagnose`, not silently swallowed.
+layout change) is visible in the debug bundle / `cli diagnose`, not silently swallowed. A failed
+browser-session request is tagged SOURCE_BROWSER_SESSION_EXPIRED specifically (not a generic auth
+code) so the suggested action is "run cli browser-login again", not "connect to VPN".
 """
 from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 from cash_equivalents_mvp.audit import sha256_file
+from cash_equivalents_mvp.collectors import browser_session
 from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure, save_debug_html
 from cash_equivalents_mvp.config import raw_sources_dir, source_material_dir, workbook_map
 from cash_equivalents_mvp.models import (
@@ -68,12 +78,13 @@ class GicRatesResponsibility(Responsibility):
     display_name = "GIC Rates"
     dependencies = ()
 
-    def _download_xlsx(self, context: RunContext, url: str, timeout: float) -> Path | None:
+    def _download_xlsx(self, context: RunContext, url: str, timeout: float,
+                        get_fn: Callable = httpx.get, using_browser_session: bool = False) -> Path | None:
         """Downloads url and returns a saved path only if the response actually looks like an
         xlsx file — a SharePoint link without a valid session typically 200s with an HTML login
         page instead of erroring, which would otherwise crash the parser with a confusing error."""
         try:
-            resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+            resp = get_fn(url, timeout=timeout, follow_redirects=True)
             resp.raise_for_status()
         except Exception as exc:
             code, retryable = classify_http_exception(exc)
@@ -84,6 +95,17 @@ class GicRatesResponsibility(Responsibility):
         content_type = resp.headers.get("content-type", "")
         looks_like_xlsx = _XLSX_CONTENT_TYPE_MARKER in content_type or resp.content[:2] == _XLSX_MAGIC
         if not looks_like_xlsx:
+            if using_browser_session and browser_session.is_login_page(str(resp.url), resp.text):
+                self._record_error(
+                    context, "collect_automatic", "SOURCE_BROWSER_SESSION_EXPIRED",
+                    f"{url} redirected to a login page even with a saved browser session — the "
+                    f"session has expired. Run: python -m cash_equivalents_mvp.cli browser-login "
+                    f"--source gic_rates",
+                    severity="warning",
+                )
+                # Raised (not returned) so collect_automatic can downgrade every remaining tier
+                # to plain HTTP instead of retrying with the same already-expired session.
+                raise browser_session.BrowserSessionExpiredError(url)
             self._record_error(
                 context, "collect_automatic", "SOURCE_AUTH_REQUIRED",
                 f"{url} returned {content_type!r}, not a spreadsheet — likely redirected to a "
@@ -98,15 +120,27 @@ class GicRatesResponsibility(Responsibility):
         dest.write_bytes(resp.content)
         return dest
 
-    def _find_rates_link_on_product_page(self, context: RunContext, page_url: str, timeout: float) -> str | None:
+    def _find_rates_link_on_product_page(self, context: RunContext, page_url: str, timeout: float,
+                                          get_fn: Callable = httpx.get,
+                                          using_browser_session: bool = False) -> str | None:
         try:
-            resp = httpx.get(page_url, timeout=timeout, follow_redirects=True)
+            resp = get_fn(page_url, timeout=timeout, follow_redirects=True)
             resp.raise_for_status()
         except Exception as exc:
             code, retryable = classify_http_exception(exc)
             self._record_error(context, "collect_automatic", code, describe_failure(page_url, exc),
                                 severity="warning", retryable=retryable, exc=exc)
             return None
+
+        if using_browser_session and browser_session.is_login_page(str(resp.url), resp.text):
+            self._record_error(
+                context, "collect_automatic", "SOURCE_BROWSER_SESSION_EXPIRED",
+                f"{page_url} redirected to a login page even with a saved browser session — the "
+                f"session has expired. Run: python -m cash_equivalents_mvp.cli browser-login "
+                f"--source gic_rates",
+                severity="warning",
+            )
+            raise browser_session.BrowserSessionExpiredError(page_url)
 
         soup = BeautifulSoup(resp.text, "lxml")
         for a in soup.find_all("a", href=True):
@@ -141,6 +175,20 @@ class GicRatesResponsibility(Responsibility):
         web_method: str | None = None
         web_source_url: str | None = None
 
+        # Tier 0: a persistent browser session, if one has been set up (`cli browser-login
+        # --source gic_rates`). A real debug bundle proved gic-tca.shtml redirects an
+        # unauthenticated request straight to Microsoft/Entra ID SSO — this is the only tier that
+        # can get past that. `authenticated_client` returns None if no profile was ever created,
+        # so this is a complete no-op for anyone who hasn't run browser-login.
+        get_fn: Callable = httpx.get
+        using_browser_session = False
+        client = None
+        browser_profile = auto_cfg.get("browser_profile")
+        if browser_profile:
+            client = browser_session.authenticated_client(browser_profile, timeout)
+            if client is not None:
+                get_fn, using_browser_session = client.get, True
+
         # Scrape first, static link second — deliberately, not for speed. The SharePoint URL is a
         # "Copy Link" share-link with an embedded token (see the ?d=...&e=... in
         # config/sources.yaml's comment) that can expire or be revoked independent of whether the
@@ -150,18 +198,40 @@ class GicRatesResponsibility(Responsibility):
         # when the page is temporarily unreachable but the token still happens to work.
         product_page_url = auto_cfg.get("product_page_url")
         if product_page_url:
-            link = self._find_rates_link_on_product_page(context, product_page_url, timeout)
+            try:
+                link = self._find_rates_link_on_product_page(context, product_page_url, timeout,
+                                                               get_fn=get_fn, using_browser_session=using_browser_session)
+            except browser_session.BrowserSessionExpiredError:
+                # Already logged inside the helper. Downgrade to plain HTTP for every remaining
+                # tier rather than retrying the same known-expired session again below.
+                get_fn, using_browser_session, link = httpx.get, False, None
             if link:
-                web_path = self._download_xlsx(context, link, timeout)
+                try:
+                    web_path = self._download_xlsx(context, link, timeout,
+                                                     get_fn=get_fn, using_browser_session=using_browser_session)
+                except browser_session.BrowserSessionExpiredError:
+                    get_fn, using_browser_session, web_path = httpx.get, False, None
                 if web_path:
-                    web_method, web_source_url = "web_scraped", link
+                    web_method = "web_scraped_authenticated" if using_browser_session else "web_scraped"
+                    web_source_url = link
 
         if web_path is None:
             sharepoint_url = auto_cfg.get("sharepoint_url")
             if sharepoint_url:
-                web_path = self._download_xlsx(context, sharepoint_url, timeout)
+                try:
+                    web_path = self._download_xlsx(context, sharepoint_url, timeout,
+                                                     get_fn=get_fn, using_browser_session=using_browser_session)
+                except browser_session.BrowserSessionExpiredError:
+                    get_fn, using_browser_session = httpx.get, False
+                    web_path = self._download_xlsx(context, sharepoint_url, timeout,
+                                                     get_fn=get_fn, using_browser_session=using_browser_session)
                 if web_path:
-                    web_method, web_source_url = "sharepoint_direct_fallback", sharepoint_url
+                    web_method = ("sharepoint_direct_fallback_authenticated" if using_browser_session
+                                  else "sharepoint_direct_fallback")
+                    web_source_url = sharepoint_url
+
+        if client is not None:
+            client.close()
 
         if web_path is not None:
             try:

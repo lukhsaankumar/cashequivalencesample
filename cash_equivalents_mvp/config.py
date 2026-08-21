@@ -74,6 +74,14 @@ def raw_sources_dir() -> Path:
     return d
 
 
+def browser_profile_dir() -> Path:
+    """Root for named persistent Playwright browser profiles — session cookies only, never
+    passwords. Under local_data/, already fully gitignored. See SECURITY.md."""
+    d = REPO_ROOT / settings()["browser_profile_dir"]
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def database_path() -> Path:
     p = REPO_ROOT / settings()["database_path"]
     p.parent.mkdir(parents=True, exist_ok=True)
