@@ -1,5 +1,5 @@
-"""Tests for the new GIC Rates dynamic web-pull chain (SharePoint direct link ->
-gic-tca.shtml link-scrape -> file/fixture fallback). All network calls mocked — see
+"""Tests for the GIC Rates dynamic web-pull chain (gic-tca.shtml link-scrape, tried first ->
+SharePoint direct link, fallback only -> file/fixture fallback). All network calls mocked — see
 tests/contract/test_file_responsibility_contracts.py's _block_real_network fixture note on why
 this suite must never depend on real network access.
 """
@@ -65,36 +65,12 @@ def test_sharepoint_returning_html_login_page_falls_through_to_source_material(m
     assert any(e.error_code == "SOURCE_AUTH_REQUIRED" and e.severity == "warning" for e in errors)
 
 
-def test_web_pull_succeeds_via_sharepoint_direct_link(monkeypatch, tmp_path):
-    """When the SharePoint link genuinely returns a real xlsx, it should be parsed directly —
-    verified against the real GIC Rates.xlsx bytes so the full download->parse path is exercised."""
-    import cash_equivalents_mvp.responsibilities.gic_rates as gic_mod
-
-    real_gic_file = source_material_dir() / "GIC Rates.xlsx"
-    if not real_gic_file.exists():
-        pytest.skip("source_material/GIC Rates.xlsx not present")
-    real_bytes = real_gic_file.read_bytes()
-
-    def fake_get(url, **kw):
-        assert "sharepoint.com" in url
-        return _fake_xlsx_response(content=real_bytes)
-    monkeypatch.setattr(httpx, "get", fake_get)
-
-    resp = GicRatesResponsibility()
-    ctx = make_context(_db(tmp_path), tmp_path)
-    status = resp.run_automatic(ctx)
-
-    assert status == ResponsibilityStatus.COMPLETE
-    records = ctx.db.get_rate_records(ctx.run_id, "gic_rates")
-    assert len(records) >= 1
-    artifacts = ctx.db.get_artifacts(ctx.run_id)
-    web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
-    assert web_artifact.collection_method == "sharepoint_direct"
-
-
-def test_web_pull_scrapes_product_page_when_sharepoint_fails(monkeypatch, tmp_path):
-    """SharePoint fails outright; the product page is scraped for a rates-file link and that
-    link is followed instead — exercises the BeautifulSoup link-discovery path."""
+def test_web_pull_succeeds_via_product_page_scrape_tried_first(monkeypatch, tmp_path):
+    """The product page is tried FIRST (not as a fallback) — it's re-discovered fresh every run
+    from whatever gic-tca.shtml actually links to right now, unlike the static SharePoint URL,
+    which can go stale (see its embedded share-link token in config/sources.yaml). Verified
+    against the real GIC Rates.xlsx bytes so the full scrape->download->parse path is exercised,
+    and that SharePoint is never even called when the scrape succeeds on the first try."""
     real_gic_file = source_material_dir() / "GIC Rates.xlsx"
     if not real_gic_file.exists():
         pytest.skip("source_material/GIC Rates.xlsx not present")
@@ -112,7 +88,7 @@ def test_web_pull_scrapes_product_page_when_sharepoint_fails(monkeypatch, tmp_pa
     def fake_get(url, **kw):
         calls.append(url)
         if "sharepoint.com" in url:
-            raise httpx.ConnectError("simulated SharePoint auth failure")
+            raise AssertionError("SharePoint fallback should not be called when the scrape succeeds")
         if url.endswith("gic-tca.shtml"):
             return _fake_html_login_response(product_page_html)
         if url.endswith("current-gic-rates.xlsx"):
@@ -127,10 +103,43 @@ def test_web_pull_scrapes_product_page_when_sharepoint_fails(monkeypatch, tmp_pa
 
     assert status == ResponsibilityStatus.COMPLETE
     assert any(c.endswith("current-gic-rates.xlsx") for c in calls)
+    records = ctx.db.get_rate_records(ctx.run_id, "gic_rates")
+    assert len(records) >= 1
     artifacts = ctx.db.get_artifacts(ctx.run_id)
     web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
     assert web_artifact.collection_method == "web_scraped"
     assert web_artifact.source_url.endswith("current-gic-rates.xlsx")
+
+
+def test_web_pull_falls_back_to_sharepoint_when_scrape_fails(monkeypatch, tmp_path):
+    """When the product page can't be scraped (unreachable, or no matching link found), the
+    static SharePoint link is tried as a fallback — this is the "share-link token still happens
+    to work" fast path, only ever reached after the self-updating tier has failed."""
+    real_gic_file = source_material_dir() / "GIC Rates.xlsx"
+    if not real_gic_file.exists():
+        pytest.skip("source_material/GIC Rates.xlsx not present")
+    real_bytes = real_gic_file.read_bytes()
+
+    def fake_get(url, **kw):
+        if "sharepoint.com" in url:
+            return _fake_xlsx_response(content=real_bytes)
+        raise httpx.ConnectError("simulated product page unreachable")
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    resp = GicRatesResponsibility()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+
+    assert status == ResponsibilityStatus.COMPLETE
+    records = ctx.db.get_rate_records(ctx.run_id, "gic_rates")
+    assert len(records) >= 1
+    artifacts = ctx.db.get_artifacts(ctx.run_id)
+    web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
+    assert web_artifact.collection_method == "sharepoint_direct_fallback"
+
+    # The failed scrape tier must still be logged, not silently skipped.
+    errors = ctx.db.get_errors(ctx.run_id, "gic_rates")
+    assert any(e.error_code == "SOURCE_HTTP_TIMEOUT" and e.severity == "warning" for e in errors)
 
 
 def test_product_page_with_no_matching_link_logs_layout_changed_warning(monkeypatch, tmp_path):

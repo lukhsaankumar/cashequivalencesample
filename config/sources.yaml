@@ -40,10 +40,13 @@ sources:
     mode: hybrid
     automatic:
       type: web_then_file_watch
-      # Tier 1: the SharePoint working copy linked directly from Step by Step Cash And
-      # Equivalents.docx ("Mike's Folder"). Tier 2: the public GIC product page — scraped for a
-      # link to the current rate file/page, since the actual file link on that page can change.
-      # Tier 3 (below): file_watch folder. Tier 4: source_material/ historical-demo fixture.
+      # Tier 1: the public GIC product page — scraped fresh every run for whatever rates-file
+      # link is currently on it, since that link can change over time.
+      # Tier 2 (fallback only): the SharePoint direct link from Step by Step Cash And
+      # Equivalents.docx ("Mike's Folder") — a "Copy Link" share URL with an embedded access
+      # token (see the ?d=...&e=... below) that can expire/rotate independent of the file itself,
+      # so it's a fast-path backup, not the primary source. Tier 3 (below): file_watch folder.
+      # Tier 4: source_material/ historical-demo fixture.
       sharepoint_url: "https://446346262425.sharepoint.com/:x:/r/teams/IG-Portfolio-Strategist/Shared%20Documents/Cash%20and%20equivalents/Mike%27s%20Folder/GIC%20Rates.xlsx?d=w3963642ba08c4bae8190dad1a4ae884a&csf=1&web=1&e=pcDvdc"
       product_page_url: "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
       folder: "local_data/uploads/gic_rates"

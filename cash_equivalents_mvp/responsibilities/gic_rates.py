@@ -3,14 +3,18 @@
 Automatic collection order — dynamic web pull first, file/fixture fallback only if that fails
 for a reason outside our control (per master prompt §7.3, and because GIC rates change often
 enough that a stale historical fixture is a worse default than a live pull):
-  1. Direct download of the SharePoint working copy of GIC Rates.xlsx, linked from
-     "Step by Step Cash And Equivalents.docx" ("Mike's Folder"). Requires IG VPN + an
-     authenticated SharePoint session; a raw request typically gets redirected to a login page,
-     which is detected (via content-type / not looking like a real xlsx) rather than mis-parsed.
-  2. If that fails, fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml,
-     same docx) and scrape it for a link to the current rate file, then download and parse that.
-     The actual file linked from that page can change over time, which is why this scrapes for
-     the link rather than hardcoding a second fixed URL.
+  1. Fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml, linked from
+     "Step by Step Cash And Equivalents.docx") and scrape it for a link to the current rate file,
+     then download and parse that. Tried *first*, not as a fallback, because it's re-discovered
+     fresh every run — whatever file the page actually links to right now — rather than depending
+     on a URL captured once and hoping it's still valid.
+  2. If that fails, fall back to the direct SharePoint link to GIC Rates.xlsx ("Mike's Folder",
+     same docx). This is a "Copy Link" share URL with an embedded access token
+     (see config/sources.yaml) that can expire or be revoked independent of whether the file
+     still exists — kept only as a fast-path backup, not the primary source of truth. Both web
+     tiers require an IG VPN + authenticated session; a raw request typically gets redirected to
+     a login page, which is detected (via content-type / not looking like a real xlsx) rather
+     than mis-parsed.
   3. If both web tiers fail, detect a newly downloaded GIC Rates.xlsx/CSV in the configured
      upload folder, falling back to source_material/ for the historical demo.
   4. Otherwise MANUAL_REQUIRED — manual upload is the last resort, not the default path.
@@ -130,20 +134,27 @@ class GicRatesResponsibility(Responsibility):
         web_method: str | None = None
         web_source_url: str | None = None
 
-        sharepoint_url = auto_cfg.get("sharepoint_url")
-        if sharepoint_url:
-            web_path = self._download_xlsx(context, sharepoint_url, timeout)
-            if web_path:
-                web_method, web_source_url = "sharepoint_direct", sharepoint_url
+        # Scrape first, static link second — deliberately, not for speed. The SharePoint URL is a
+        # "Copy Link" share-link with an embedded token (see the ?d=...&e=... in
+        # config/sources.yaml's comment) that can expire or be revoked independent of whether the
+        # underlying file still exists; the scraped link is re-discovered fresh every run from
+        # whatever gic-tca.shtml actually links to *right now*, so it self-corrects if the file
+        # moves or the share link rots. The static link is kept only as a fast-path fallback for
+        # when the page is temporarily unreachable but the token still happens to work.
+        product_page_url = auto_cfg.get("product_page_url")
+        if product_page_url:
+            link = self._find_rates_link_on_product_page(context, product_page_url, timeout)
+            if link:
+                web_path = self._download_xlsx(context, link, timeout)
+                if web_path:
+                    web_method, web_source_url = "web_scraped", link
 
         if web_path is None:
-            product_page_url = auto_cfg.get("product_page_url")
-            if product_page_url:
-                link = self._find_rates_link_on_product_page(context, product_page_url, timeout)
-                if link:
-                    web_path = self._download_xlsx(context, link, timeout)
-                    if web_path:
-                        web_method, web_source_url = "web_scraped", link
+            sharepoint_url = auto_cfg.get("sharepoint_url")
+            if sharepoint_url:
+                web_path = self._download_xlsx(context, sharepoint_url, timeout)
+                if web_path:
+                    web_method, web_source_url = "sharepoint_direct_fallback", sharepoint_url
 
         if web_path is not None:
             try:
