@@ -51,12 +51,23 @@ def test_has_profile_false_when_directory_exists_but_empty(tmp_path, monkeypatch
     assert browser_session.has_profile("igm_default") is False
 
 
-def test_has_profile_true_once_populated(tmp_path, monkeypatch):
+def test_has_profile_false_when_directory_has_unrelated_files_but_no_state_json(tmp_path, monkeypatch):
+    """A stray file must not be mistaken for a real saved session — only state.json (written by
+    interactive_login's context.storage_state()) counts."""
     monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
     monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
     profile_dir = tmp_path / "igm_default"
     profile_dir.mkdir()
-    (profile_dir / "Default").mkdir()
+    (profile_dir / "some_other_file.txt").write_text("not a session")
+    assert browser_session.has_profile("igm_default") is False
+
+
+def test_has_profile_true_once_state_json_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
+    monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
+    profile_dir = tmp_path / "igm_default"
+    profile_dir.mkdir()
+    (profile_dir / "state.json").write_text('{"cookies": [], "origins": []}')
     assert browser_session.has_profile("igm_default") is True
 
 
@@ -87,6 +98,6 @@ def test_logout_deletes_existing_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
     profile_dir = tmp_path / "igm_default"
     profile_dir.mkdir()
-    (profile_dir / "Default").mkdir()
+    (profile_dir / "state.json").write_text('{"cookies": [], "origins": []}')
     assert browser_session.logout("igm_default") is True
     assert not profile_dir.exists()

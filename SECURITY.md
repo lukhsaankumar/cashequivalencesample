@@ -102,6 +102,34 @@ blocking or redirecting that specific domain outright (not just re-signing it) �
 IT-side allowlist change, not a client-side fix, and will still correctly fall through to a
 manual upload in the meantime.
 
+**`playwright install chromium` hits the same proxy, but `pip-system-certs` does not fix it.**
+That command downloads the actual browser binary through Playwright's own Node.js-based
+downloader (bundled inside the `playwright` package, not your Python interpreter) — Node has a
+completely separate TLS trust store from Python, so patching Python's never touches it. This
+shows up as a Node stack trace ending in `Error: self-signed certificate in certificate chain` /
+`code: 'SELF_SIGNED_CERT_IN_CHAIN'`, immediately after `pip install -e ".[browser-auth]"` succeeds
+— it's an install-time failure, not something `classify_http_exception()` ever sees or classifies,
+since it happens outside this application's own HTTP calls entirely.
+
+**Fix:** export the same Windows-trusted root CA(s) to a PEM file and point Node at them via
+`NODE_EXTRA_CA_CERTS`:
+
+```powershell
+$pemPath = "$env:USERPROFILE\corporate-root-cas.pem"
+Remove-Item $pemPath -ErrorAction SilentlyContinue
+foreach ($cert in Get-ChildItem Cert:\LocalMachine\Root) {
+    $b64 = [System.Convert]::ToBase64String($cert.RawData, 'InsertLineBreaks')
+    "-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----" | Add-Content -Path $pemPath -Encoding ascii
+}
+[Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $pemPath, "User")
+$env:NODE_EXTRA_CA_CERTS = $pemPath   # also set for the current session
+playwright install chromium
+```
+
+If the corporate MITM CA is pushed to the per-user store instead of the machine store, add
+`Cert:\CurrentUser\Root` to the `Get-ChildItem` list too. This is a one-time step per machine —
+only needed for `playwright install`, never for normal application use afterward.
+
 ## Persistent authenticated browser sessions (SSO-gated sources, opt-in)
 
 `gic_rates`, `money_market`, `hisa`, and `treasury_bills` are, per real captured evidence (a
@@ -121,15 +149,20 @@ every constraint above:
    browser. This app never sees, touches, or stores any of it; you're typing directly into
    Microsoft's / the source's own real login form, rendered by a real browser engine.
 3. Once you're past the login page, the app detects it (by URL/content — the same login markers
-   captured from the real debug bundle) and closes the window. Playwright's persistent browser
-   profile has already written the resulting **session cookies** to
-   `local_data/browser_profiles/<profile>/` as you browsed — nothing extra is extracted or copied.
-4. Automated runs afterward reuse those cookies (`collectors/browser_session.py:
+   captured from the real debug bundle) and explicitly snapshots the resulting **session cookies**
+   (Playwright's `context.storage_state()`) to `local_data/browser_profiles/<profile>/state.json`
+   before closing the window — an explicit snapshot, not Chromium's own on-disk profile store,
+   since a corporate SSO session cookie is typically a "session cookie" (no fixed expiry, by
+   design, so it ends when the browser truly closes) and Chromium's profile persistence does not
+   reliably carry those across separate automated runs the way an explicit snapshot does.
+4. Automated runs afterward reuse that saved snapshot (`collectors/browser_session.py:
    authenticated_client` / `render_authenticated_page`) to make requests as your already-signed-in
    session — the same thing your browser does every time you reopen a tab without re-entering your
-   password. If the session has expired, the source correctly reports
-   `SOURCE_BROWSER_SESSION_EXPIRED` and falls through to the next tier / `MANUAL_REQUIRED`, telling
-   you to run `browser-login` again — it never tries to re-authenticate on its own.
+   password — and re-save it after each successful use, so any token refresh the site performs
+   extends the saved session the same way it would if you'd left a real tab open. If the session
+   has expired, the source correctly reports `SOURCE_BROWSER_SESSION_EXPIRED` and falls through to
+   the next tier / `MANUAL_REQUIRED`, telling you to run `browser-login` again — it never tries to
+   re-authenticate on its own.
 
 **Why this doesn't violate "never bypasses authentication":** authentication still happens, in
 full, every single time a session needs to be established or refreshed — by you, interactively, in

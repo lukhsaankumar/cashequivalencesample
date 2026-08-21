@@ -29,6 +29,48 @@ Run `python -m cash_equivalents_mvp.cli doctor` after installing to confirm the 
 ready — it checks Python version, every dependency, `source_material/` templates, directory
 writability, and renderer availability.
 
+### If your project folder is inside a OneDrive-synced directory
+
+Create the virtualenv **outside** the OneDrive tree — OneDrive's file locking/sync interferes with
+`pip`/`uv`'s hardlinking and shows up as `Access is denied` / `failed to hardlink` errors during
+install, even with `--link-mode=copy`. Keep the project source in OneDrive if you like; just put
+`.venv` somewhere else:
+
+```powershell
+uv venv C:\venvs\<project-name>
+C:\venvs\<project-name>\Scripts\Activate.ps1
+cd "<your OneDrive project folder>"
+uv pip install -e ".[dev,windows]" --link-mode=copy
+```
+
+To recreate the venv from scratch later: `Remove-Item -Recurse -Force C:\venvs\<project-name>`,
+then repeat the two `uv` commands above.
+
+### If your network does TLS inspection (corporate proxy)
+
+Some corporate networks re-sign outbound HTTPS with an internal root CA, which breaks Python's
+and Node's default certificate trust (`[SSL: CERTIFICATE_VERIFY_FAILED] ... self-signed
+certificate in certificate chain`). Two separate fixes are needed — one for Python (`pip`/`httpx`
+calls this app makes itself), one for Node (only needed if you install the `browser-auth` extra,
+since `playwright install` downloads the browser binary through a bundled Node.js downloader with
+its own separate trust store). Full detail and copy-paste commands are in `SECURITY.md` under
+"Corporate network TLS inspection" — short version:
+
+```powershell
+# Python side (covers every httpx/pip call this app makes):
+uv pip install -e ".[dev,windows,corp-network]" --link-mode=copy
+
+# Node side (only if you're also installing browser-auth — see below):
+$pemPath = "$env:USERPROFILE\corporate-root-cas.pem"
+foreach ($cert in Get-ChildItem Cert:\LocalMachine\Root) {
+    $b64 = [System.Convert]::ToBase64String($cert.RawData, 'InsertLineBreaks')
+    "-----BEGIN CERTIFICATE-----`n$b64`n-----END CERTIFICATE-----" | Add-Content -Path $pemPath -Encoding ascii
+}
+[Environment]::SetEnvironmentVariable("NODE_EXTRA_CA_CERTS", $pemPath, "User")
+```
+(Paste the Node block as one multi-line block, or run each line separately — pasting it collapsed
+onto a single line breaks PowerShell's parser.)
+
 ## Windows Excel prerequisites
 
 Excel COM automation (`reporting/excel_com.py`) opens Excel invisibly via `win32com.client`,
@@ -105,6 +147,28 @@ worth reading before approving.
 **Outputs and Downloads** (page 6) lists the EN/FR workbooks, EN/FR PDFs, the unsent `.eml` draft,
 and the ZIP package for the selected run, each with a SHA-256 and a real download button.
 
+## Automating SSO-gated sources (GIC Rates, Money Market, HISA, Treasury Bills)
+
+These sources sit behind interactive corporate SSO (confirmed via a real captured Microsoft/Entra
+ID login redirect, not assumed) — a plain HTTP request can never get past that. Optionally, a
+persistent browser session lets automatic collection get past it too, using a session *you*
+create by signing in yourself once:
+
+```powershell
+uv pip install -e ".[dev,windows,browser-auth]" --link-mode=copy
+playwright install chromium   # one-time; see "If your network does TLS inspection" above if this fails
+python -m cash_equivalents_mvp.cli browser-login --source gic_rates
+```
+
+The last command opens a visible browser window — sign in exactly as you normally would (password,
+MFA); the window closes itself once you're past the login page. All four sources share one saved
+profile (`igm_default` in `config/sources.yaml`), so this one login covers all of them. Check
+status any time with `cli browser-status`; clear a saved session with
+`cli browser-logout --profile igm_default`. Nothing about this stores a password — see
+`SECURITY.md`'s "Persistent authenticated browser sessions" section for exactly what is and isn't
+saved. Entirely optional: skip this and every source falls back to plain HTTP, then file/manual
+upload, exactly as before.
+
 ## How to generate a debug bundle
 
 **Debugging** (page 7) shows the stage timeline and every structured error for the selected run,
@@ -113,8 +177,9 @@ environment info for offline diagnosis.
 
 ## Known limitations
 
-- Money Market, HISA, and the SharePoint copy of GIC Rates cannot be automatically retrieved
-  outside the IG corporate VPN in this environment — see `ASSUMPTIONS.md`.
+- Money Market, HISA, and the SharePoint copy of GIC Rates require either the IG corporate VPN +
+  a plain authenticated request, or the optional browser-session setup above — see
+  `ASSUMPTIONS.md` and "Automating SSO-gated sources" above.
 - The Fed Funds `UPPER_BOUND` rule and the HISA "highest rate" product selection are both flagged
   `UNCONFIRMED_BUSINESS_RULE` — real business decisions inferred from the historical example, not
   confirmed in writing.
@@ -127,9 +192,10 @@ environment info for offline diagnosis.
 ## Clearing confidential local data
 
 ```powershell
-Remove-Item -Recurse -Force local_data\runs\*, local_data\uploads\*, local_data\raw_sources\*, local_data\database\*, local_data\logs\*
+Remove-Item -Recurse -Force local_data\runs\*, local_data\uploads\*, local_data\raw_sources\*, local_data\database\*, local_data\logs\*, local_data\browser_profiles\*
 ```
 
+(The last one signs out every saved browser-session profile — omit it if you want to keep those.)
 See `SECURITY.md` for the full data-handling policy.
 
 ## Tests

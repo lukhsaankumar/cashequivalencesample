@@ -17,6 +17,16 @@ What this module does NOT do, ever (see SECURITY.md):
   - It only ever reuses the *session* (cookies) that results from a login the user already
     performed — functionally identical to a browser's "stay signed in", not a bypass of it.
 
+Session persistence uses Playwright's documented `storage_state()` pattern
+(https://playwright.dev/python/docs/auth#reuse-authentication-state) — an explicit JSON snapshot
+of cookies + local storage, refreshed after every successful use — rather than
+`launch_persistent_context`'s on-disk Chromium profile. That distinction matters: a corporate SSO
+session cookie is typically a "session cookie" (no explicit Expires/Max-Age, by design, so it
+ends when the browser truly closes), and Chromium's persistent-profile store does not reliably
+carry those across separate process launches the way `storage_state()` does — an earlier version
+of this module used `launch_persistent_context` throughout and the saved session was gone almost
+immediately after a real interactive login, which is what motivated this rewrite.
+
 Fully optional and backward compatible: if playwright isn't installed, or a named profile has
 never been created (`cli browser-login` never run for it), every function here degrades to a
 silent no-op (`has_profile` false / functions return None) so every responsibility's existing
@@ -39,6 +49,8 @@ LOGIN_CONTENT_MARKERS = ("urlMsaSignUp", "sCompanyDisplayName", "Shibboleth.sso/
 _CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
+_STATE_FILENAME = "state.json"
+
 
 class BrowserSessionExpiredError(Exception):
     """A saved profile exists but the site redirected to a login page — the session needs
@@ -49,11 +61,15 @@ def profile_path(profile_name: str) -> Path:
     return browser_profile_dir() / profile_name
 
 
+def _state_path(profile_name: str) -> Path:
+    return profile_path(profile_name) / _STATE_FILENAME
+
+
 def has_profile(profile_name: str) -> bool:
-    """True only once `interactive_login` has actually completed for this name — an empty/never-
-    created directory means the feature simply isn't set up yet, not an error."""
-    p = profile_path(profile_name)
-    return p.exists() and any(p.iterdir())
+    """True only once `interactive_login` has actually completed and saved a storage-state
+    snapshot for this name — an empty/never-created directory means the feature simply isn't set
+    up yet, not an error."""
+    return _state_path(profile_name).exists()
 
 
 def is_login_page(final_url: str, text: str) -> bool:
@@ -68,9 +84,10 @@ def is_login_page(final_url: str, text: str) -> bool:
 def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 300) -> bool:
     """Opens a VISIBLE Chromium window at `start_url` for the user to sign in exactly as they
     normally would (including any MFA prompt). Blocks until the browser has navigated away from
-    the login host, or `timeout_seconds` elapses. Playwright's persistent context writes cookies/
-    local storage for the profile to disk as the user browses, so no explicit "save" step is
-    needed — closing the context is enough. Returns True if a sign-in was detected."""
+    the login host, or `timeout_seconds` elapses. On success, snapshots cookies + local storage to
+    disk via `context.storage_state()` — captured explicitly, not left to Chromium's own profile
+    persistence, since that does not reliably survive session-only SSO cookies across separate
+    process launches (see module docstring). Returns True if a sign-in was detected."""
     from playwright.sync_api import sync_playwright  # deferred: optional dependency
 
     dest = profile_path(profile_name)
@@ -81,7 +98,8 @@ def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 
 
     signed_in = False
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(str(dest), headless=False)
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context()
         page = context.new_page()
         page.goto(start_url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
         deadline = time.monotonic() + timeout_seconds
@@ -90,12 +108,14 @@ def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 
                 signed_in = True
                 break
             time.sleep(2)
-        context.close()
+        if signed_in:
+            context.storage_state(path=str(_state_path(profile_name)))
+        browser.close()
 
     if signed_in:
-        print(f"Signed in — session saved to {dest}")
+        print(f"Signed in — session saved to {_state_path(profile_name)}")
     else:
-        print("Timed out waiting for sign-in; nothing was saved as confirmed. Run this again if "
+        print("Timed out waiting for sign-in; nothing was saved. Run this again if "
               "the source still reports SOURCE_BROWSER_SESSION_EXPIRED.")
     return signed_in
 
@@ -110,14 +130,22 @@ def logout(profile_name: str) -> bool:
     return False
 
 
+def _refresh_state(profile_name: str, context) -> None:
+    """Re-saves storage_state after a successful use so token rotation/refresh the site performed
+    during this visit extends the saved session's real lifetime, the same way an actual browser
+    tab left open would keep sliding its session forward."""
+    context.storage_state(path=str(_state_path(profile_name)))
+
+
 def authenticated_client(profile_name: str, timeout_seconds: float = 20):
     """Returns an httpx.Client pre-loaded with this profile's saved cookies, or None if no
     profile has been created yet — callers should treat None exactly like "browser auth isn't
     configured for this source" and fall through to their existing plain-HTTP tier.
 
-    Cheap: only launches a headless browser briefly to read cookies off disk, then closes it —
-    the actual HTTP requests are plain httpx using those cookies, so existing response-handling
-    code (content-type checks, parsers, error classification) is reused unchanged."""
+    Cheap: only launches a headless browser briefly to load the saved storage state and read
+    cookies, then closes it — the actual HTTP requests are plain httpx using those cookies, so
+    existing response-handling code (content-type checks, parsers, error classification) is
+    reused unchanged."""
     if not has_profile(profile_name):
         return None
     try:
@@ -128,9 +156,11 @@ def authenticated_client(profile_name: str, timeout_seconds: float = 20):
     import httpx
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(str(profile_path(profile_name)), headless=True)
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(storage_state=str(_state_path(profile_name)))
         cookies = context.cookies()
-        context.close()
+        _refresh_state(profile_name, context)
+        browser.close()
 
     jar = httpx.Cookies()
     for c in cookies:
@@ -153,14 +183,18 @@ def render_authenticated_page(profile_name: str, url: str, timeout_seconds: floa
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(str(profile_path(profile_name)), headless=True)
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(storage_state=str(_state_path(profile_name)))
         page = context.new_page()
         page.goto(url, wait_until="networkidle", timeout=timeout_seconds * 1000)
         html = page.content()
         final_url = page.url
-        context.close()
+        expired = is_login_page(final_url, html)
+        if not expired:
+            _refresh_state(profile_name, context)
+        browser.close()
 
-    if is_login_page(final_url, html):
+    if expired:
         raise BrowserSessionExpiredError(
             f"{url} redirected to a login page — the saved session for profile {profile_name!r} "
             f"has expired. Run: python -m cash_equivalents_mvp.cli browser-login --source <id>"
