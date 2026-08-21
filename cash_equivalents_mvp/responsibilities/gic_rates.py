@@ -96,11 +96,17 @@ class GicRatesResponsibility(Responsibility):
         looks_like_xlsx = _XLSX_CONTENT_TYPE_MARKER in content_type or resp.content[:2] == _XLSX_MAGIC
         if not looks_like_xlsx:
             if using_browser_session and browser_session.is_login_page(str(resp.url), resp.text):
+                # Saved for inspection, not just described — "session expired" is a detector
+                # verdict (is_login_page's marker match), not a certainty; the only way to confirm
+                # it wasn't a false positive (e.g. a cross-resource SharePoint auth gap that looks
+                # different from the home.investorsgroup.com login page) is to look at what was
+                # actually returned.
+                debug_path = save_debug_html(context.run_id, "gic_xlsx_download_expired", resp.text)
                 self._record_error(
                     context, "collect_automatic", "SOURCE_BROWSER_SESSION_EXPIRED",
                     f"{url} redirected to a login page even with a saved browser session — the "
                     f"session has expired. Run: python -m cash_equivalents_mvp.cli browser-login "
-                    f"--source gic_rates",
+                    f"--source gic_rates. Actual response saved to {debug_path}.",
                     severity="warning",
                 )
                 # Raised (not returned) so collect_automatic can downgrade every remaining tier
@@ -133,11 +139,12 @@ class GicRatesResponsibility(Responsibility):
             return None
 
         if using_browser_session and browser_session.is_login_page(str(resp.url), resp.text):
+            debug_path = save_debug_html(context.run_id, "gic_product_page_session_expired", resp.text)
             self._record_error(
                 context, "collect_automatic", "SOURCE_BROWSER_SESSION_EXPIRED",
                 f"{page_url} redirected to a login page even with a saved browser session — the "
                 f"session has expired. Run: python -m cash_equivalents_mvp.cli browser-login "
-                f"--source gic_rates",
+                f"--source gic_rates. Actual response saved to {debug_path}.",
                 severity="warning",
             )
             raise browser_session.BrowserSessionExpiredError(page_url)

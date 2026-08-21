@@ -258,8 +258,16 @@ def test_browser_session_expired_falls_through_to_sharepoint_via_plain_http(monk
 
     assert status == ResponsibilityStatus.COMPLETE
     errors = ctx.db.get_errors(ctx.run_id, "gic_rates")
-    assert any(e.error_code == "SOURCE_BROWSER_SESSION_EXPIRED" and e.severity == "warning" for e in errors)
+    expired_error = next((e for e in errors if e.error_code == "SOURCE_BROWSER_SESSION_EXPIRED"), None)
+    assert expired_error is not None and expired_error.severity == "warning"
     assert fake_client.calls == [product_url]  # never retried against sharepoint with the dead session
     artifacts = ctx.db.get_artifacts(ctx.run_id)
     web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
     assert web_artifact.collection_method == "sharepoint_direct_fallback"  # not the _authenticated variant
+
+    # save_debug_html writes outside tmp_path, into the real raw_sources_dir() — clean up.
+    import re
+    from pathlib import Path
+    saved_path_match = re.search(r"saved to (\S+)\.", expired_error.message)
+    assert saved_path_match, expired_error.message
+    Path(saved_path_match.group(1)).unlink(missing_ok=True)
