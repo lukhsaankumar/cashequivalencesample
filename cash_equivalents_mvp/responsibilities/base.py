@@ -166,6 +166,13 @@ class Responsibility(ABC):
             self._set_status(context, ResponsibilityStatus.VALIDATION_FAILED)
             return ResponsibilityStatus.VALIDATION_FAILED
 
+        # Persisting the artifact here, centrally, means every responsibility's evidence shows
+        # up in the UI ("View evidence") and `db.get_artifacts()` without each one needing to
+        # remember to call save_artifact() itself — template.py still saves its own (it has two,
+        # EN+FR, so CollectionResult's single `.artifact` slot doesn't fit it), which is harmless
+        # since save_artifact() is an idempotent INSERT OR REPLACE keyed by artifact_id.
+        if collection.artifact is not None:
+            context.db.save_artifact(collection.artifact)
         self.persist(context, records)
         status = (ResponsibilityStatus.SUCCESS_WITH_WARNINGS if result.findings
                   else ResponsibilityStatus.SUCCESS)

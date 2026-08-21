@@ -1,21 +1,36 @@
 """GIC Rates responsibility — cashable GICs, term deposits, GIC 1yr-5yr (annual/compound/monthly).
 
-Automatic collection order (per master prompt §7.3):
-  1. Approved direct file/API retrieval — not configured (no such endpoint documented); skipped.
-  2. Authenticated retrieval through a user-authorized session — the SharePoint copy of
-     GIC Rates.xlsx (see docs/source_inventory.md) requires the IG VPN + auth; not attempted here.
-  3. Detect a newly downloaded GIC Rates.xlsx in the configured folder
-     (local_data/uploads/gic_rates), falling back to source_material/ for the historical demo.
-  4. Detect GIC Rates(Eng).csv in the same folder.
-  5. Otherwise MANUAL_REQUIRED.
+Automatic collection order — dynamic web pull first, file/fixture fallback only if that fails
+for a reason outside our control (per master prompt §7.3, and because GIC rates change often
+enough that a stale historical fixture is a worse default than a live pull):
+  1. Direct download of the SharePoint working copy of GIC Rates.xlsx, linked from
+     "Step by Step Cash And Equivalents.docx" ("Mike's Folder"). Requires IG VPN + an
+     authenticated SharePoint session; a raw request typically gets redirected to a login page,
+     which is detected (via content-type / not looking like a real xlsx) rather than mis-parsed.
+  2. If that fails, fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml,
+     same docx) and scrape it for a link to the current rate file, then download and parse that.
+     The actual file linked from that page can change over time, which is why this scrapes for
+     the link rather than hardcoding a second fixed URL.
+  3. If both web tiers fail, detect a newly downloaded GIC Rates.xlsx/CSV in the configured
+     upload folder, falling back to source_material/ for the historical demo.
+  4. Otherwise MANUAL_REQUIRED — manual upload is the last resort, not the default path.
+
+Every failed tier logs the real reason (severity="warning", non-fatal) via
+collectors.http.classify_http_exception so the actual cause (TLS trust, auth redirect, timeout,
+layout change) is visible in the debug bundle / `cli diagnose`, not silently swallowed.
 """
 from __future__ import annotations
 
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import urljoin
+
+import httpx
+from bs4 import BeautifulSoup
 
 from cash_equivalents_mvp.audit import sha256_file
-from cash_equivalents_mvp.config import source_material_dir, workbook_map
+from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
+from cash_equivalents_mvp.config import raw_sources_dir, source_material_dir, workbook_map
 from cash_equivalents_mvp.models import (
     CollectionResult,
     ManualInput,
@@ -40,15 +55,118 @@ from cash_equivalents_mvp.validation.common import check_rate_range, finding
 EXPECTED_PROVIDER_PREFIXES_12 = {"B2B", "BMO", "BMT", "BOM", "BNS", "EQB", "EQT", "HOBK", "HTC", "LBC", "MBC", "NBC"}
 EXPECTED_PROVIDER_PREFIXES_8 = {"BMO", "BMT", "BOM", "BNS", "EQB", "EQT", "HOBK", "HTC"}
 
+_XLSX_CONTENT_TYPE_MARKER = "spreadsheet"
+_XLSX_MAGIC = b"PK"  # xlsx is a zip archive
+
 
 class GicRatesResponsibility(Responsibility):
     responsibility_id = "gic_rates"
     display_name = "GIC Rates"
     dependencies = ()
 
+    def _download_xlsx(self, context: RunContext, url: str, timeout: float) -> Path | None:
+        """Downloads url and returns a saved path only if the response actually looks like an
+        xlsx file — a SharePoint link without a valid session typically 200s with an HTML login
+        page instead of erroring, which would otherwise crash the parser with a confusing error."""
+        try:
+            resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+            resp.raise_for_status()
+        except Exception as exc:
+            code, retryable = classify_http_exception(exc)
+            self._record_error(context, "collect_automatic", code, describe_failure(url, exc),
+                                severity="warning", retryable=retryable, exc=exc)
+            return None
+
+        content_type = resp.headers.get("content-type", "")
+        looks_like_xlsx = _XLSX_CONTENT_TYPE_MARKER in content_type or resp.content[:2] == _XLSX_MAGIC
+        if not looks_like_xlsx:
+            self._record_error(
+                context, "collect_automatic", "SOURCE_AUTH_REQUIRED",
+                f"{url} returned {content_type!r}, not a spreadsheet — likely redirected to a "
+                f"SharePoint/SSO login page. Requires an authenticated session.",
+                severity="warning",
+            )
+            return None
+
+        dest_dir = raw_sources_dir() / context.run_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / "gic_rates_web.xlsx"
+        dest.write_bytes(resp.content)
+        return dest
+
+    def _find_rates_link_on_product_page(self, context: RunContext, page_url: str, timeout: float) -> str | None:
+        try:
+            resp = httpx.get(page_url, timeout=timeout, follow_redirects=True)
+            resp.raise_for_status()
+        except Exception as exc:
+            code, retryable = classify_http_exception(exc)
+            self._record_error(context, "collect_automatic", code, describe_failure(page_url, exc),
+                                severity="warning", retryable=retryable, exc=exc)
+            return None
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        for a in soup.find_all("a", href=True):
+            href = str(a["href"])  # bs4 types this as str | AttributeValueList; hrefs are always str
+            text = a.get_text(" ", strip=True).lower()
+            if href.lower().endswith((".xlsx", ".xlsm", ".csv")):
+                return urljoin(page_url, href)
+            if "gic" in text and "rate" in text:
+                return urljoin(page_url, href)
+
+        self._record_error(
+            context, "collect_automatic", "SOURCE_LAYOUT_CHANGED",
+            f"No GIC rates link found on {page_url} — page layout may have changed, or this page "
+            f"requires an authenticated session to show its real content.",
+            severity="warning",
+        )
+        return None
+
     def collect_automatic(self, context: RunContext) -> CollectionResult:
         cfg = context.source_config(self.responsibility_id)
-        folder = Path(cfg.get("automatic", {}).get("folder", "local_data/uploads/gic_rates"))
+        auto_cfg = cfg.get("automatic", {})
+        timeout = auto_cfg.get("timeout_seconds", 15)
+
+        web_path: Path | None = None
+        web_method: str | None = None
+        web_source_url: str | None = None
+
+        sharepoint_url = auto_cfg.get("sharepoint_url")
+        if sharepoint_url:
+            web_path = self._download_xlsx(context, sharepoint_url, timeout)
+            if web_path:
+                web_method, web_source_url = "sharepoint_direct", sharepoint_url
+
+        if web_path is None:
+            product_page_url = auto_cfg.get("product_page_url")
+            if product_page_url:
+                link = self._find_rates_link_on_product_page(context, product_page_url, timeout)
+                if link:
+                    web_path = self._download_xlsx(context, link, timeout)
+                    if web_path:
+                        web_method, web_source_url = "web_scraped", link
+
+        if web_path is not None:
+            try:
+                source_map = workbook_map("en")["gic_rates_source"]
+                rows = parse_gic_rates_xlsx(web_path, source_map)
+            except Exception as exc:
+                self._record_error(context, "collect_automatic", "PARSER_NO_ROWS",
+                                    f"Downloaded file from {web_source_url} did not parse as expected "
+                                    f"GIC Rates.xlsx layout: {exc}",
+                                    severity="warning", exc=exc)
+            else:
+                artifact = SourceArtifact(
+                    run_id=context.run_id, responsibility_id=self.responsibility_id,
+                    filename=web_path.name, sha256=sha256_file(web_path),
+                    collection_method=web_method or "web",  # always set alongside web_path above
+                    source_url=web_source_url,
+                    mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    local_path=str(web_path), parser_version=XLSX_PARSER_VERSION,
+                )
+                return CollectionResult(ok=True, status=ResponsibilityStatus.SUCCESS, raw_rows=rows, artifact=artifact)
+
+        # Both web tiers failed (or aren't configured) — fall through to file-based tiers.
+        folder = Path(auto_cfg.get("folder", "local_data/uploads/gic_rates"))
         candidates = []
         if folder.exists():
             candidates += sorted(folder.glob("GIC Rates*.xlsx")) + sorted(folder.glob("GIC Rates*.csv"))
@@ -60,7 +178,8 @@ class GicRatesResponsibility(Responsibility):
             err = ResponsibilityError(
                 run_id=context.run_id, responsibility_id=self.responsibility_id, stage="collect_automatic",
                 error_code="FILE_MISSING", retryable=False,
-                message="No GIC Rates.xlsx or GIC Rates(Eng).csv found in the watched folder or source_material/.",
+                message="Live GIC Rates web pull failed (see warnings above) and no GIC Rates.xlsx or "
+                        "CSV was found in the watched folder or source_material/.",
                 suggested_action="Upload GIC Rates.xlsx or a CSV on the Manual Uploads page.",
             )
             return CollectionResult(ok=False, status=ResponsibilityStatus.MANUAL_REQUIRED, error=err)

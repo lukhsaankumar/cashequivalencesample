@@ -1,8 +1,17 @@
 # Source configuration. modes: automatic | manual | hybrid | disabled
+#
+# `reference_url` on each source is a human-browsable page a reviewer can open to independently
+# verify the value the automatic collector pulled — shown in the UI's Responsibility Status page
+# ("View evidence"). It is deliberately separate from the machine endpoint the collector actually
+# calls (`automatic.url` etc.), which is often a raw API/data endpoint, not something a human
+# would want to open in a browser.
+#
 # NOTE: home.investorsgroup.com, digital.lipperweb.com and *.sharepoint.com sources require the
-# IG corporate VPN + authenticated session, which this environment does not have. Their automatic
-# collectors are implemented and will be attempted every run; expect them to fail fast with
-# SOURCE_HTTP_TIMEOUT / SOURCE_AUTH_REQUIRED outside the VPN and fall through to MANUAL_REQUIRED.
+# IG corporate VPN + authenticated session. Automatic collectors for these are fully implemented
+# and attempted every run; outside the VPN expect them to fail fast with a real captured error
+# (SOURCE_HTTP_TIMEOUT / SOURCE_AUTH_REQUIRED / a TLS error) and fall through to the next tier.
+# Manual upload is the last resort, never the first choice — every automatic tier below is tried
+# before a responsibility is marked MANUAL_REQUIRED.
 
 sources:
   template:
@@ -30,14 +39,21 @@ sources:
     enabled: true
     mode: hybrid
     automatic:
-      type: file_watch
+      type: web_then_file_watch
+      # Tier 1: the SharePoint working copy linked directly from Step by Step Cash And
+      # Equivalents.docx ("Mike's Folder"). Tier 2: the public GIC product page — scraped for a
+      # link to the current rate file/page, since the actual file link on that page can change.
+      # Tier 3 (below): file_watch folder. Tier 4: source_material/ historical-demo fixture.
+      sharepoint_url: "https://446346262425.sharepoint.com/:x:/r/teams/IG-Portfolio-Strategist/Shared%20Documents/Cash%20and%20equivalents/Mike%27s%20Folder/GIC%20Rates.xlsx?d=w3963642ba08c4bae8190dad1a4ae884a&csf=1&web=1&e=pcDvdc"
+      product_page_url: "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
       folder: "local_data/uploads/gic_rates"
-      timeout_seconds: 5
+      timeout_seconds: 15
       retries: 0
     manual:
       allowed_types: [xlsx, csv]
     freshness:
       maximum_age_days: 14
+    reference_url: "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
 
   canada_prime:
     enabled: true
@@ -52,6 +68,7 @@ sources:
       allowed_types: [numeric]
     freshness:
       maximum_age_days: 14
+    reference_url: "https://www.bankofcanada.ca/rates/interest-rates/canadian-interest-rates/"
 
   us_fed_funds:
     enabled: true
@@ -69,6 +86,8 @@ sources:
       allowed_types: [numeric]
     freshness:
       maximum_age_days: 14
+    reference_url: "https://fred.stlouisfed.org/series/DFEDTARU"
+    reference_url_lower: "https://fred.stlouisfed.org/series/DFEDTARL"
 
   money_market:
     enabled: true
@@ -84,19 +103,26 @@ sources:
       allowed_types: [numeric]
     freshness:
       maximum_age_days: 14
+    reference_url: "https://digital.lipperweb.com/invgrp/profile?symbol=68317397&lang=en"
+    reference_url_us: "https://digital.lipperweb.com/invgrp/profile?symbol=68002367&lang=en"
 
   treasury_bills:
     enabled: true
     mode: hybrid
     automatic:
-      type: file_watch
+      type: http_then_file_watch
+      # NBIN (National Bank Independent Network) — linked from Step by Step docx. Login-gated;
+      # the live attempt is still made every run so the real failure reason (not just "we didn't
+      # try") is captured and visible in the debug bundle, then falls through to file_watch.
+      url: "https://www.nbin.ca/cmst/site/index.jhtml?navid=814"
       folder: "local_data/uploads/tbills"
-      timeout_seconds: 5
+      timeout_seconds: 15
       retries: 0
     manual:
       allowed_types: [pdf, txt]
     freshness:
       maximum_age_days: 14
+    reference_url: "https://www.nbin.ca/cmst/site/index.jhtml?navid=814"
 
   hisa:
     enabled: true
@@ -112,3 +138,4 @@ sources:
       allowed_types: [csv, xlsx, pdf, structured]
     freshness:
       maximum_age_days: 14
+    reference_url: "https://home.investorsgroup.com/Content/en/products/shortTrm/igEQBHighInterest.shtml"

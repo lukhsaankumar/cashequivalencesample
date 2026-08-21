@@ -1,15 +1,22 @@
 """Treasury-Bill responsibility — Canadian and US T-bill rates from an NBF/NBCN rate sheet PDF.
 
-Automatic collection: NBIN (nbin.ca) is login-gated (see docs/source_inventory.md), so real
-automatic retrieval isn't attempted; this responsibility watches a download folder (and, for the
-historical demo, source_material/) for an NBF PDF, matching master prompt step 2 ("monitor a
-configured download folder").
+Automatic collection: NBIN (nbin.ca) is login-gated (see docs/source_inventory.md), so a live GET
+is still attempted every run — not to scrape rate data from it (a raw unauthenticated request
+against a login-gated page has nothing parseable to offer, and its real post-login page structure
+has never been seen by this codebase), but so the *real* reason it can't be used automatically
+(timeout, TLS trust failure, login redirect, etc.) is captured and visible in the debug bundle /
+`cli diagnose`, instead of the responsibility silently skipping straight to the file-watch tier.
+Falls through to watching a download folder (and, for the historical demo, source_material/) for
+an NBF PDF, matching master prompt step 2 ("monitor a configured download folder").
 """
 from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+
 from cash_equivalents_mvp.audit import sha256_file
+from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
 from cash_equivalents_mvp.config import source_material_dir
 from cash_equivalents_mvp.models import (
     CollectionResult,
@@ -34,6 +41,16 @@ class TreasuryBillsResponsibility(Responsibility):
 
     def collect_automatic(self, context: RunContext) -> CollectionResult:
         cfg = context.source_config(self.responsibility_id).get("automatic", {})
+        url = cfg.get("url")
+        if url:
+            try:
+                resp = httpx.get(url, timeout=cfg.get("timeout_seconds", 15), follow_redirects=True)
+                resp.raise_for_status()
+            except Exception as exc:
+                code, retryable = classify_http_exception(exc)
+                self._record_error(context, "collect_automatic", code, describe_failure(url, exc),
+                                    severity="warning", retryable=retryable, exc=exc)
+
         folder = Path(cfg.get("folder", "local_data/uploads/tbills"))
         candidates = sorted(folder.glob("*.pdf")) if folder.exists() else []
         smd = source_material_dir()

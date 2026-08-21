@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from cash_equivalents_mvp.config import sources_config
 from cash_equivalents_mvp.orchestration.graph import DEPENDENCIES, build_registry, topological_order
 from cash_equivalents_mvp.ui import state
 from cash_equivalents_mvp.ui.components import card_end, card_start, page_header, status_badge
@@ -45,6 +46,15 @@ def render() -> None:
         mc2.metric("Warnings", sum(1 for f in findings if f.severity == "warning"))
         mc3.metric("Errors", len(errors))
 
+        source_cfg = sources_config().get(rid, {})
+        ref_links = [(label, url) for label, url in [
+            ("Verify source", source_cfg.get("reference_url")),
+            ("Verify source (lower bound)", source_cfg.get("reference_url_lower")),
+            ("Verify source (US)", source_cfg.get("reference_url_us")),
+        ] if url]
+        if ref_links:
+            st.caption(" · ".join(f"[{label}]({url})" for label, url in ref_links))
+
         if errors:
             latest = errors[-1]
             st.error(f"**{latest.error_code}** ({latest.stage}): {latest.message}\n\n"
@@ -66,4 +76,6 @@ def render() -> None:
             for a in artifacts:
                 st.write(f"**{a.filename}**")
                 st.caption(f"method: {a.collection_method} · sha256: {a.sha256[:16] or '(n/a)'}...")
+                if a.source_url:
+                    st.caption(f"endpoint actually called: {a.source_url}")
         card_end()

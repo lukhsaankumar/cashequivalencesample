@@ -62,6 +62,39 @@ Remove-Item -Recurse -Force local_data\runs\*, local_data\uploads\*, local_data\
 (`source_material/` is left untouched — it's the read-only approved template/source set, not
 run-generated state.)
 
+## Corporate network TLS inspection (`SOURCE_TLS_TRUST_FAILURE`)
+
+Some corporate networks run outbound HTTPS through a proxy that performs SSL/TLS inspection —
+the proxy re-signs every HTTPS connection with its own internal root CA so it can inspect
+traffic, which is invisible to a normal browser (the corporate CA is pushed to the OS trust store
+via Group Policy) but breaks Python's `httpx`/`requests`, which only trust the bundled `certifi`
+CA list by default. This shows up as `SOURCE_TLS_TRUST_FAILURE` — the underlying error looks like
+`[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in
+certificate chain`.
+
+**This is expected on such a network and does not indicate a code bug** — every collector's HTTP
+call goes through `collectors/http.py: classify_http_exception()`, which recognizes this exact
+failure and reports it distinctly from "source unreachable" / "needs VPN" so it isn't confused
+with the other, unrelated `SOURCE_AUTH_REQUIRED` cases.
+
+**Fix:**
+
+```powershell
+pip install -e ".[dev,windows,corp-network]"
+# or, if already installed:
+pip install pip-system-certs
+```
+
+This patches Python (via a `.pth` file loaded at interpreter startup) to validate certificates
+against the Windows certificate store instead of only `certifi`'s bundled list — since the
+corporate root CA is already in the Windows store (that's how your browser trusts it), this is
+usually a complete fix with no other configuration. Restart the terminal/venv after installing.
+
+If a source still fails after installing `pip-system-certs`, the corporate proxy is likely
+blocking or redirecting that specific domain outright (not just re-signing it) — that needs an
+IT-side allowlist change, not a client-side fix, and will still correctly fall through to a
+manual upload in the meantime.
+
 ## Known gaps (tracked, not silently ignored)
 
 - The Streamlit app has no authentication of its own — it's designed to run on `localhost` for a

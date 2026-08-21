@@ -5,6 +5,7 @@ never require source_material and always run.
 """
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from cash_equivalents_mvp.config import source_material_dir
@@ -14,6 +15,17 @@ from cash_equivalents_mvp.responsibilities.gic_rates import GicRatesResponsibili
 from cash_equivalents_mvp.responsibilities.hisa import HisaResponsibility
 from cash_equivalents_mvp.responsibilities.treasury_bills import TreasuryBillsResponsibility
 from tests.conftest import requires_source_material, make_context
+
+
+@pytest.fixture(autouse=True)
+def _block_real_network(monkeypatch):
+    """gic_rates/hisa/treasury_bills now all attempt a real HTTP call before falling back to
+    file/fixture tiers. Block it here by default so this file's fallback-tier tests stay fast
+    and deterministic regardless of what network the test machine actually has — offline tests
+    must never depend on live network access, whether it succeeds or fails."""
+    def _fail_fast(url, **kw):
+        raise httpx.ConnectError("blocked in test: no real network calls in the offline suite")
+    monkeypatch.setattr(httpx, "get", _fail_fast)
 
 
 def _db(tmp_path):

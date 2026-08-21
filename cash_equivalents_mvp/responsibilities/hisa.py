@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 
 from cash_equivalents_mvp.audit import sha256_file
+from cash_equivalents_mvp.collectors.http import classify_http_exception, describe_failure
 from cash_equivalents_mvp.config import resolve_sheet_name, settings, source_material_dir, workbook_map
 from cash_equivalents_mvp.models import (
     CollectionResult,
@@ -62,8 +63,13 @@ class HisaResponsibility(Responsibility):
             # The product page is a single-product marketing page, not a machine-readable roster —
             # reaching it at all only proves VPN/network connectivity, not that we could scrape the
             # full ~30-provider table from it. Fall through to the structured-file paths below.
-        except Exception:
-            pass  # expected outside the IG VPN; proceed to file-based fallbacks
+        except Exception as exc:
+            # Logged as a non-fatal warning (not returned as a failure) — HISA still has real
+            # file-based fallback tiers below, unlike money_market. This is what makes the real
+            # reason visible in the debug bundle / `cli diagnose` instead of being silently lost.
+            code, retryable = classify_http_exception(exc)
+            self._record_error(context, "collect_automatic", code, describe_failure(url, exc),
+                                severity="warning", retryable=retryable, exc=exc)
 
         folder = Path(context.settings()["upload_dir"]) / "hisa"
         csv_candidates = sorted(folder.glob("*.csv")) if folder.exists() else []

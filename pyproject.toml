@@ -28,6 +28,12 @@ dev = [
     "mypy>=1.10",
 ]
 windows = ["pywin32>=306"]
+# For corporate networks that do TLS/SSL inspection (a proxy re-signs HTTPS traffic with its own
+# root CA) — install this if collectors fail with SOURCE_TLS_TRUST_FAILURE / "self-signed
+# certificate in certificate chain". Patches Python to trust the OS certificate store (which
+# already has the corporate root CA, via Group Policy) instead of only the bundled `certifi` list.
+# See SECURITY.md.
+corp-network = ["pip-system-certs>=4.0"]
 
 [build-system]
 requires = ["setuptools>=68"]
