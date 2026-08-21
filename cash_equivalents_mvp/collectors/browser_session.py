@@ -92,6 +92,7 @@ def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 
 
     dest = profile_path(profile_name)
     dest.mkdir(parents=True, exist_ok=True)
+    existing_state = _state_path(profile_name)
     print(f"Opening a browser window for {start_url}")
     print("Sign in exactly as you normally would (including MFA if prompted).")
     print(f"This window closes automatically once you're signed in (or after {timeout_seconds}s).")
@@ -99,7 +100,13 @@ def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 
     signed_in = False
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
+        # If this profile already has a saved session (e.g. from signing into a different source
+        # that shares this profile name), load it into the new context first so this login ADDS
+        # to it instead of replacing it — context.storage_state() below saves the union of both.
+        # Without this, a second `browser-login` for a different source silently wipes out every
+        # other source's already-saved session, since they'd otherwise start from an empty context.
+        context = (browser.new_context(storage_state=str(existing_state)) if existing_state.exists()
+                   else browser.new_context())
         page = context.new_page()
         page.goto(start_url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
         deadline = time.monotonic() + timeout_seconds

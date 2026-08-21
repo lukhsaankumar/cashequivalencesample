@@ -140,8 +140,10 @@ class _FakeBrowser:
     def __init__(self, context):
         self._context = context
         self.closed = False
+        self.new_context_calls: list[dict] = []
 
-    def new_context(self):
+    def new_context(self, **kw):
+        self.new_context_calls.append(kw)
         return self._context
 
     def close(self):
@@ -202,3 +204,33 @@ def test_interactive_login_survives_transient_content_race_during_sso_redirect(t
     assert browser.closed is True
     assert context.storage_state_calls  # session was saved
     assert browser_session.has_profile("igm_default") is True
+
+
+def test_interactive_login_loads_existing_session_before_saving_a_new_one(tmp_path, monkeypatch):
+    """Regression test for a real bug: all four sources share one profile name (igm_default).
+    interactive_login used to always start from an empty context and unconditionally overwrite
+    state.json — so signing into a second source silently destroyed the first source's already-
+    saved session instead of adding to it. A real user hit this: `browser-login --source
+    money_market` after an earlier successful `browser-login --source gic_rates` wiped the
+    gic_rates session back to expired on the very next run."""
+    monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
+    monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
+    monkeypatch.setattr(browser_session.time, "sleep", lambda s: None)
+
+    # Simulate an already-saved session from a prior browser-login for a different source.
+    profile_dir = tmp_path / "igm_default"
+    profile_dir.mkdir()
+    existing_state_path = profile_dir / "state.json"
+    existing_state_path.write_text('{"cookies": [{"name": "gic_rates_session"}], "origins": []}')
+
+    real_url = "https://digital.lipperweb.com/invgrp/profile?symbol=68317397&lang=en"
+    page = _FakePage([(real_url, "<html>signed in to lipper</html>")])
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    ok = browser_session.interactive_login("igm_default", real_url, timeout_seconds=30)
+
+    assert ok is True
+    # The new context must have been seeded with the pre-existing session, not started empty —
+    # this is what makes the saved storage_state() at the end a union of both sources' cookies
+    # instead of a wholesale replacement.
+    assert browser.new_context_calls == [{"storage_state": str(existing_state_path)}]
