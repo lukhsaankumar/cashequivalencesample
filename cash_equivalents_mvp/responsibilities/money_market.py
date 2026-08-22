@@ -38,7 +38,15 @@ from cash_equivalents_mvp.normalization.percentages import parse_and_normalize_r
 from cash_equivalents_mvp.responsibilities.base import Responsibility, RunContext
 from cash_equivalents_mvp.validation.common import check_rate_range, finding
 
-_YIELD_PATTERN = re.compile(r"current\s+yield[^0-9%]{0,20}([\d.]+)\s*%", re.IGNORECASE)
+
+# The real page (confirmed via a rendered debug capture) is a two-cell table row:
+#   <td>Current Yield (%)</td><td>1.88 (8/20/2026)</td>
+# — the label carries its own "(%)"; the value has no trailing "%" at all. The gap between "yield"
+# and the number is therefore allowed to include almost anything (including a literal "%", which
+# an earlier version of this pattern excluded — the exact bug that caused every real page to miss),
+# and the number itself is matched bare, with no required trailing "%". This is also a strict
+# superset of the older synthetic "Current Yield 2.00%" inline-text shape, which still matches.
+_YIELD_PATTERN = re.compile(r"current\s+yield[^\d]{0,20}(\d+\.\d+|\d+)", re.IGNORECASE)
 
 
 def _extract_current_yield(html: str) -> str | None:
