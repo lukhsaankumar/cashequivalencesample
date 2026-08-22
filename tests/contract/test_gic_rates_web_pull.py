@@ -332,3 +332,57 @@ def test_sharepoint_fallback_download_gets_download_param_appended(monkeypatch, 
     assert len(download_calls) == 1
     assert "download=1" in download_calls[0]
     assert download_calls[0].startswith(sharepoint_url.split("?")[0])
+
+
+def test_mcas_download_block_notice_is_recognized_not_mistaken_for_a_real_file(monkeypatch, tmp_path):
+    """Regression test for a real, confirmed case: a download event fires and produces real bytes
+    (so it's not BrowserDownloadNotTriggeredError), but those bytes are Microsoft Defender for
+    Cloud Apps' small plain-text DLP notice substituted for the actual file, not the file itself.
+    Must be recognized and reported clearly (SOURCE_DOWNLOAD_BLOCKED_BY_POLICY), not accepted as
+    if it might be valid and left to fail later with a confusing "File is not a zip file" error."""
+    # Captured verbatim from a real blocked download attempt.
+    block_notice = (
+        b"The file was blocked since it contained data that is not allowed to be downloaded.\n"
+        b"----------------------------------------------------------------------------------\n"
+        b"Original file name: GIC%20Rates.xlsx\n"
+        b"Original file size in bytes: 345239\n"
+        b"----------------------------------------------------------------------------------\n"
+        b"DOWNLOAD RESTRICTED\n\n"
+        b"To help protect IGM information, downloads from this session are restricted because "
+        b"this device is not managed by IGM. Please use a managed IGM device or contact the IGM "
+        b"Service Desk for assistance."
+    )
+
+    product_url = "https://home.investorsgroup.com/Content/en/products/pr/gic-tca.shtml"
+    xlsx_url = "https://home.investorsgroup.com/Content/en/products/pr/current-gic-rates.xlsx"
+    product_page_html = f'<html><body><a href="{xlsx_url}">Current GIC Rates</a></body></html>'
+    fake_client = _FakeAuthenticatedClient({product_url: _fake_html_login_response(product_page_html)})
+
+    def fake_download_via_browser(profile, url, timeout, headless=True):
+        return block_notice
+
+    def fail_plain_http(url, **kw):
+        raise AssertionError(f"unexpected plain httpx.get call: {url}")
+    monkeypatch.setattr(httpx, "get", fail_plain_http)
+    monkeypatch.setattr(browser_session, "has_profile", lambda name: True)
+    monkeypatch.setattr(browser_session, "authenticated_client", lambda profile, timeout: fake_client)
+    monkeypatch.setattr(browser_session, "download_via_browser", fake_download_via_browser)
+
+    resp = GicRatesResponsibility()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+
+    # Both web tiers correctly reject the block notice (not mistaken for a real file), so this
+    # falls all the way through to the real source_material/ fixture and still succeeds overall —
+    # what matters here is that SOURCE_DOWNLOAD_BLOCKED_BY_POLICY was logged clearly along the way,
+    # not that the run ends in MANUAL_REQUIRED.
+    assert status == ResponsibilityStatus.COMPLETE
+    artifacts = ctx.db.get_artifacts(ctx.run_id)
+    web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")
+    assert web_artifact.collection_method == "source_material_fixture"
+
+    errors = ctx.db.get_errors(ctx.run_id, "gic_rates")
+    block_errors = [e for e in errors if e.error_code == "SOURCE_DOWNLOAD_BLOCKED_BY_POLICY"]
+    assert block_errors, errors
+    assert "not managed by IGM" in block_errors[0].message
+    assert block_errors[0].suggested_action and "Service Desk" in block_errors[0].suggested_action

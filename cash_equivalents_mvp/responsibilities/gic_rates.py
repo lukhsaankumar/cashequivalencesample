@@ -14,20 +14,28 @@ enough that a stale historical fixture is a worse default than a live pull):
      Purely additive: if no browser profile has ever been created, every request below is
      identical to before.
 
-     KNOWN DEAD END, confirmed via a real debug bundle, not a guess: even with a valid session and
-     real browser navigation, both the dynamically-discovered and the static SharePoint links land
-     on `*.access.mcas.ms/aad_login?...requestedClientCert=true&IsManagedDevice-...=...` — MCAS's
-     device-trust check, which asks the browser to present a corporate-issued client certificate
-     proving the request comes from a managed device, not just an authenticated user. This is a
-     different, deeper security layer than a login wall (device identity, not user session) and
-     is not something this app will ever try to satisfy — doing so would mean extracting the real
-     corporate device certificate into an automation tool's browser context, i.e. actively working
-     around a managed-device control the organization deliberately put in place, which is a
-     materially different and more serious thing than reusing a user's own session cookie (see
-     SECURITY.md's "never bypasses authentication"). SOURCE_LAYOUT_CHANGED here (via
-     BrowserDownloadNotTriggeredError) is expected to recur every time; MANUAL_REQUIRED for GIC
-     Rates' web tiers is the correct, by-design outcome on a network where this policy applies,
-     not a bug to keep chasing.
+     KNOWN DEAD END, confirmed via real debug bundles, not a guess — two separate, stacked MCAS
+     (Microsoft Defender for Cloud Apps) checks, not one:
+       (a) A device-trust check on general access: `*.access.mcas.ms/aad_login?
+           ...requestedClientCert=true&IsManagedDevice-...=...`, asking for a corporate-issued
+           client certificate. headless=False (a real, visible browser window — see
+           browser_session.download_via_browser) can get past this on a machine IT has actually
+           enrolled, by giving the OS's own certificate negotiation a real chance to run, exactly
+           like any other browser on that machine.
+       (b) A SEPARATE, stricter DLP check specifically on downloads, confirmed by a real blocked
+           attempt: even after (a) succeeds and a download event fires, MCAS's Session Control
+           policy can substitute a small plain-text notice for the real file — "DOWNLOAD
+           RESTRICTED ... this device is not managed by IGM" — rather than the actual bytes. This
+           is detected (`_describe_mcas_download_block`) and reported as
+           SOURCE_DOWNLOAD_BLOCKED_BY_POLICY, distinctly from a generic parse failure.
+     Neither of these is something this app will ever try to satisfy by extracting a real
+     certificate or otherwise working around what a device-compliance check is asking — doing so
+     would mean actively circumventing a managed-device/DLP control the organization deliberately
+     put in place, a materially different and more serious thing than reusing a user's own session
+     cookie (see SECURITY.md's "never bypasses authentication"). Microsoft's own block message
+     names the actual remedy directly (a managed device, or the IGM Service Desk) — a real,
+     organizational answer, not a code gap. MANUAL_REQUIRED for GIC Rates' web tiers is the
+     correct, by-design outcome on a machine/network where either check applies.
   1. Fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml, linked from
      "Step by Step Cash And Equivalents.docx") and scrape it for a link to the current rate file,
      then download and parse that. Tried *first*, not as a fallback, because it's re-discovered
@@ -91,6 +99,22 @@ EXPECTED_PROVIDER_PREFIXES_8 = {"BMO", "BMT", "BOM", "BNS", "EQB", "EQT", "HOBK"
 _XLSX_CONTENT_TYPE_MARKER = "spreadsheet"
 _XLSX_MAGIC = b"PK"  # xlsx is a zip archive
 
+# Captured verbatim from a real, confirmed download attempt: Microsoft Defender for Cloud Apps'
+# Session Control DLP policy can let a download *event* fire (so download_via_browser succeeds
+# and returns real bytes) while substituting a small plain-text notice for the actual file — a
+# separate, stricter check than the device-certificate one, specifically gating downloads rather
+# than general access. See SECURITY.md for why this is never something to route around.
+_MCAS_DOWNLOAD_BLOCK_MARKERS = (b"DOWNLOAD RESTRICTED", b"is not allowed to be downloaded")
+
+
+def _describe_mcas_download_block(content: bytes) -> str | None:
+    if not any(marker in content for marker in _MCAS_DOWNLOAD_BLOCK_MARKERS):
+        return None
+    try:
+        return content.decode("utf-8", errors="replace").strip()
+    except Exception:
+        return "Microsoft Defender for Cloud Apps blocked this download (device not recognized as managed)."
+
 
 def _force_sharepoint_download(url: str) -> str:
     """SharePoint/OneDrive share links (":x:/t/..." Excel-Online-viewer style, or ":x:/r/...")
@@ -143,6 +167,26 @@ class GicRatesResponsibility(Responsibility):
             # BrowserSessionExpiredError intentionally not caught here — propagates to
             # collect_automatic, which downgrades every remaining tier to plain HTTP.
             if content is not None:
+                if content[:2] != _XLSX_MAGIC:
+                    # A download event firing doesn't guarantee the bytes are the real file — a
+                    # confirmed real case: MCAS's DLP policy substitutes a small text notice for
+                    # the actual download instead of erroring or blocking the event itself.
+                    block_reason = _describe_mcas_download_block(content)
+                    if block_reason:
+                        self._record_error(
+                            context, "collect_automatic", "SOURCE_DOWNLOAD_BLOCKED_BY_POLICY",
+                            f"{url}: download blocked by Microsoft Defender for Cloud Apps — "
+                            f"{block_reason}",
+                            severity="warning",
+                        )
+                    else:
+                        self._record_error(
+                            context, "collect_automatic", "SOURCE_LAYOUT_CHANGED",
+                            f"{url}: browser download produced {len(content)} bytes with no "
+                            f"xlsx/zip signature — not the expected file.",
+                            severity="warning",
+                        )
+                    return None, False
                 dest_dir = raw_sources_dir() / context.run_id
                 dest_dir.mkdir(parents=True, exist_ok=True)
                 dest = dest_dir / "gic_rates_web.xlsx"

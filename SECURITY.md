@@ -217,6 +217,39 @@ IT, or any machine without that certificate, this fails exactly the same way it 
 correctly, since there is genuinely nothing there to negotiate. `MANUAL_REQUIRED` in that case is
 the correct, by-design outcome, not a gap to close.
 
+**A second, separate check specifically on downloads — confirmed by a real blocked attempt, not
+inferred.** Passing the device-trust check above only guarantees *general access* — MCAS's
+Session Control policy can independently block the download itself with a stricter, separate
+compliance check. A real attempt produced this exact, unedited response instead of the requested
+file:
+
+```
+The file was blocked since it contained data that is not allowed to be downloaded.
+----------------------------------------------------------------------------------
+Original file name: GIC%20Rates.xlsx
+Original file size in bytes: 345239
+----------------------------------------------------------------------------------
+DOWNLOAD RESTRICTED
+
+To help protect IGM information, downloads from this session are restricted because this device
+is not managed by IGM. Please use a managed IGM device or contact the IGM Service Desk for
+assistance.
+```
+
+`gic_rates.py`'s `_describe_mcas_download_block` recognizes this specific notice and reports it as
+`SOURCE_DOWNLOAD_BLOCKED_BY_POLICY`, distinct from a generic parse failure — the download event
+genuinely fires and produces real bytes, so this can't be caught by "no download happened" logic;
+it has to be caught by recognizing the substituted notice for what it is, so it's never mistaken
+for (or silently treated as) the real file.
+
+This is Microsoft's own IT-configured data-loss-prevention control, named as such in its own
+message, and it is never something this application will attempt to route around — doing so would
+mean actively defeating a DLP policy the organization deliberately put in place to protect its
+data, an entirely different category from anything else in this document. The message itself names
+the actual remedy, and it is organizational, not technical: use a device IGM recognizes as managed
+for downloads, or contact the IGM Service Desk to ask why this one isn't. `MANUAL_REQUIRED` is the
+correct, secure outcome here, full stop — not a limitation of this codebase to keep working around.
+
 ## Known gaps (tracked, not silently ignored)
 
 - The Streamlit app has no authentication of its own — it's designed to run on `localhost` for a

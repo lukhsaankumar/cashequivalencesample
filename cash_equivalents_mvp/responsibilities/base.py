@@ -198,6 +198,8 @@ _SUGGESTIONS = {
     "PARSER_PROVIDER_MISSING": "The expected provider row was not found; verify the source file is current.",
     "PERCENTAGE_SCALE_AMBIGUOUS": "Verify the rate value manually before approving.",
     "WORKBOOK_LABEL_MISMATCH": "The workbook template layout may have changed; re-verify the mapping.",
+    "SOURCE_DOWNLOAD_BLOCKED_BY_POLICY": "This machine isn't recognized as an IGM-managed device "
+        "for downloads. Contact the IGM Service Desk, or upload the file manually.",
 }
 
 

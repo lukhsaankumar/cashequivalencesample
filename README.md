@@ -194,12 +194,15 @@ environment info for offline diagnosis.
 ## Known limitations
 
 - Money Market and HISA are automatable with the optional browser-session setup above (Money
-  Market confirmed working end-to-end). GIC Rates' and Treasury Bills' file downloads can hit
-  Microsoft Defender for Cloud Apps' device-trust check (a corporate-managed-device certificate
-  requirement, not a login wall) — handled with a visible (not hidden) browser window so a real,
-  IT-enrolled machine gets a fair shot at it, but this only ever works on a machine your
-  organization has actually enrolled; see SECURITY.md for exactly what is and isn't attempted.
-  Treasury Bills' NBIN scrape is also unverified against NBIN's real authenticated page structure
+  Market confirmed working end-to-end). GIC Rates' and Treasury Bills' file downloads can hit two
+  separate, stacked Microsoft Defender for Cloud Apps checks: a device-trust check on general
+  access (a corporate-managed-device certificate requirement — handled with a visible, not
+  hidden, browser window so a real IT-enrolled machine gets a fair shot at it) and, confirmed by a
+  real blocked attempt, a stricter, separate DLP check specifically on downloads that a device can
+  pass the first check and still fail. Neither is something this app attempts to route around —
+  both only ever resolve on a machine/account your organization recognizes as managed for that
+  purpose; see SECURITY.md for exactly what is and isn't attempted, and the real block message
+  Microsoft returns. Treasury Bills' NBIN scrape is also unverified against NBIN's real authenticated page structure
   (never captured before this) — a first attempt will likely need a follow-up fix once real
   evidence comes back, the same way Money Market's did.
 - The Fed Funds `UPPER_BOUND` rule and the HISA "highest rate" product selection are both flagged
