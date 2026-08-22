@@ -40,6 +40,27 @@ def test_is_login_page_false_for_real_content():
     ) is False
 
 
+def test_is_login_page_detects_real_captured_nbin_login_markers():
+    # Regression test for a real bug: a browser-login attempt against NBIN's own separate login
+    # system ("nbin-login-ui", nothing to do with Microsoft/Entra) was mis-detected as "signed in"
+    # immediately, because none of the Microsoft-specific markers ever matched it — interactive_login
+    # declared success while still sitting on NBIN's actual login form. Captured verbatim (titles/
+    # labels only) from a real debug bundle.
+    html = (
+        "<title>Members Login / Connexion des membres</title>"
+        '<div class="alert alert-error">Authentication failed. Please try again.</div>'
+    )
+    assert browser_session.is_login_page("https://www.nbin.ca/nbin-login-ui/", html) is True
+
+
+def test_is_login_page_detects_unknown_vendor_via_password_field_fallback():
+    """A login system with no vendor-specific markers at all (not Microsoft, not NBIN) must still
+    be caught via the generic fallback — a real login form virtually always has a password input,
+    which is what makes this generalize past just the two vendors seen so far."""
+    html = '<form><input type="text" name="user"><input type="password" name="pw"></form>'
+    assert browser_session.is_login_page("https://some-future-vendor.example.com/signin", html) is True
+
+
 def test_has_profile_false_when_never_created(tmp_path, monkeypatch):
     monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
     monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
@@ -305,7 +326,8 @@ def test_interactive_login_loads_existing_session_before_saving_a_new_one(tmp_pa
     # The new context must have been seeded with the pre-existing session, not started empty —
     # this is what makes the saved storage_state() at the end a union of both sources' cookies
     # instead of a wholesale replacement.
-    assert browser.new_context_calls == [{"storage_state": str(existing_state_path)}]
+    assert len(browser.new_context_calls) == 1
+    assert browser.new_context_calls[0]["storage_state"] == str(existing_state_path)
 
 
 def _seed_profile(monkeypatch, tmp_path):

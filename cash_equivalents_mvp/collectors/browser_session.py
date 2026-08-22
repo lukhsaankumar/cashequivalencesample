@@ -34,6 +34,7 @@ plain-HTTP tiers are completely unaffected.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import time
 from pathlib import Path
@@ -44,10 +45,23 @@ from cash_equivalents_mvp.config import browser_profile_dir
 # Microsoft/Entra ID + Shibboleth SAML login interstitial home.investorsgroup.com redirected to
 # for an unauthenticated request. Not a guess at what an SSO page "probably" looks like.
 LOGIN_HOST_MARKERS = ("login.microsoftonline.com", "login.windows.net", "Shibboleth.sso", "/adfs/")
-LOGIN_CONTENT_MARKERS = ("urlMsaSignUp", "sCompanyDisplayName", "Shibboleth.sso/SAML2")
+LOGIN_CONTENT_MARKERS = (
+    "urlMsaSignUp", "sCompanyDisplayName", "Shibboleth.sso/SAML2",
+    # NBIN (nbin.ca)'s own separate login system ("nbin-login-ui") — confirmed real via a captured
+    # debug bundle, entirely unrelated to Microsoft/Entra. A browser-login attempt against it was
+    # previously mis-detected as "signed in" immediately, because none of the markers above (all
+    # Microsoft-specific) ever matched it — this generalizes the detector past just one vendor.
+    "Members Login", "Connexion des membres", "nbin-login-ui",
+)
+_PASSWORD_FIELD_PATTERN = re.compile(r'type=["\']password["\']', re.IGNORECASE)
 
-_CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+# Some Microsoft sign-in flows show a "continue in this browser?" interstitial when they detect a
+# browser that isn't Edge, which needs a manual click to dismiss even during an otherwise-headless/
+# unattended automated run. Identifying as Edge (its own, real, standard User-Agent string — not a
+# forged/deceptive one) avoids triggering that interstitial in the first place; not a security
+# workaround, the same kind of UA string real Edge itself already sends.
+_EDGE_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0")
 
 _STATE_FILENAME = "state.json"
 
@@ -101,12 +115,22 @@ def has_profile(profile_name: str) -> bool:
 
 
 def is_login_page(final_url: str, text: str) -> bool:
-    """Pure and independently testable — detects the exact SSO login markers captured from a real
-    debug bundle, not a heuristic guess. Used both to know when to stop waiting during interactive
-    login, and to distinguish an expired saved session from a real content/layout problem."""
+    """Pure and independently testable — detects the exact SSO login markers captured from real
+    debug bundles first, then falls back to a vendor-agnostic signal. Used both to know when to
+    stop waiting during interactive login, and to distinguish an expired saved session from a
+    real content/layout problem.
+
+    The vendor-specific markers above cover Microsoft/Entra and NBIN, the two real login systems
+    seen so far — but hardcoding markers per-vendor doesn't scale to whatever the next third-party
+    source turns out to use. A real login form virtually always has a password input field, which
+    is a far more general, still-reliable signal: this is what caught NBIN's login page correctly
+    once its specific markers were added, but is kept as a fallback so a login system 6 and 7 don't
+    need their own bespoke markers before their login pages can be recognized at all."""
     if any(marker in final_url for marker in LOGIN_HOST_MARKERS):
         return True
-    return any(marker in text for marker in LOGIN_CONTENT_MARKERS)
+    if any(marker in text for marker in LOGIN_CONTENT_MARKERS):
+        return True
+    return bool(_PASSWORD_FIELD_PATTERN.search(text))
 
 
 def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 300) -> bool:
@@ -133,8 +157,8 @@ def interactive_login(profile_name: str, start_url: str, timeout_seconds: int = 
         # to it instead of replacing it — context.storage_state() below saves the union of both.
         # Without this, a second `browser-login` for a different source silently wipes out every
         # other source's already-saved session, since they'd otherwise start from an empty context.
-        context = (browser.new_context(storage_state=str(existing_state)) if existing_state.exists()
-                   else browser.new_context())
+        context = (browser.new_context(storage_state=str(existing_state), user_agent=_EDGE_UA)
+                   if existing_state.exists() else browser.new_context(user_agent=_EDGE_UA))
         page = context.new_page()
         page.goto(start_url, wait_until="domcontentloaded", timeout=timeout_seconds * 1000)
         deadline = time.monotonic() + timeout_seconds
@@ -207,7 +231,7 @@ def authenticated_client(profile_name: str, timeout_seconds: float = 20):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=str(_state_path(profile_name)))
+        context = browser.new_context(storage_state=str(_state_path(profile_name)), user_agent=_EDGE_UA)
         cookies = context.cookies()
         _refresh_state(profile_name, context)
         browser.close()
@@ -216,7 +240,7 @@ def authenticated_client(profile_name: str, timeout_seconds: float = 20):
     for c in cookies:
         jar.set(c["name"], c["value"], domain=c.get("domain", ""), path=c.get("path", "/"))
     return httpx.Client(cookies=jar, timeout=timeout_seconds, follow_redirects=True,
-                         headers={"User-Agent": _CHROME_UA})
+                         headers={"User-Agent": _EDGE_UA})
 
 
 def render_authenticated_page(profile_name: str, url: str, timeout_seconds: float = 20) -> str | None:
@@ -234,7 +258,7 @@ def render_authenticated_page(profile_name: str, url: str, timeout_seconds: floa
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(storage_state=str(_state_path(profile_name)))
+        context = browser.new_context(storage_state=str(_state_path(profile_name)), user_agent=_EDGE_UA)
         page = context.new_page()
         page.goto(url, wait_until="networkidle", timeout=timeout_seconds * 1000)
         html, final_url = _read_content_and_url(page)
@@ -290,7 +314,8 @@ def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 3
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(storage_state=str(_state_path(profile_name)), accept_downloads=True)
+        context = browser.new_context(storage_state=str(_state_path(profile_name)), accept_downloads=True,
+                                        user_agent=_EDGE_UA)
         page = context.new_page()
         try:
             with page.expect_download(timeout=timeout_seconds * 1000) as download_info:

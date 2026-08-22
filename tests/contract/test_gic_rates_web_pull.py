@@ -12,8 +12,23 @@ from cash_equivalents_mvp.collectors import browser_session
 from cash_equivalents_mvp.config import source_material_dir
 from cash_equivalents_mvp.database import Database
 from cash_equivalents_mvp.models import ResponsibilityStatus
-from cash_equivalents_mvp.responsibilities.gic_rates import GicRatesResponsibility
+from cash_equivalents_mvp.responsibilities.gic_rates import GicRatesResponsibility, _force_sharepoint_download
 from tests.conftest import make_context, requires_source_material
+
+
+def test_force_sharepoint_download_appends_param_to_sharepoint_urls():
+    # Real evidence: a scraped ":x:/t/..." SharePoint link opened Excel Online's viewer instead of
+    # downloading a file (BrowserDownloadNotTriggeredError) — download=1 is SharePoint/OneDrive's
+    # own documented parameter for requesting the raw file instead.
+    url = "https://446346262425.sharepoint.com/:x:/t/IGInvestmentProduct/abc123?xsdata=foo"
+    result = _force_sharepoint_download(url)
+    assert "download=1" in result
+    assert "xsdata=foo" in result  # existing query params preserved, not clobbered
+
+
+def test_force_sharepoint_download_is_a_no_op_for_non_sharepoint_urls():
+    url = "https://home.investorsgroup.com/Content/en/products/pr/current-gic-rates.xlsx"
+    assert _force_sharepoint_download(url) == url
 
 
 def _db(tmp_path):
@@ -281,3 +296,39 @@ def test_browser_session_expired_falls_through_to_sharepoint_via_plain_http(monk
     saved_path_match = re.search(r"saved to (\S+)\.", expired_error.message)
     assert saved_path_match, expired_error.message
     Path(saved_path_match.group(1)).unlink(missing_ok=True)
+
+
+def test_sharepoint_fallback_download_gets_download_param_appended(monkeypatch, tmp_path):
+    """The browser-navigation download of a SharePoint link must go through
+    _force_sharepoint_download first — a real debug bundle showed the un-transformed link landing
+    on Excel Online's viewer (BrowserDownloadNotTriggeredError) instead of downloading a file."""
+    real_gic_file = source_material_dir() / "GIC Rates.xlsx"
+    if not real_gic_file.exists():
+        pytest.skip("source_material/GIC Rates.xlsx not present")
+    real_bytes = real_gic_file.read_bytes()
+
+    sharepoint_url = ("https://446346262425.sharepoint.com/:x:/r/teams/IG-Portfolio-Strategist/"
+                       "Shared%20Documents/Cash%20and%20equivalents/Mike%27s%20Folder/GIC%20Rates.xlsx"
+                       "?d=w3963642ba08c4bae8190dad1a4ae884a&csf=1&web=1&e=pcDvdc")
+
+    def fail_product_page_scrape(url, **kw):
+        raise httpx.ConnectError("simulated: force straight to the sharepoint fallback tier")
+    monkeypatch.setattr(httpx, "get", fail_product_page_scrape)
+    monkeypatch.setattr(browser_session, "has_profile", lambda name: True)
+    monkeypatch.setattr(browser_session, "authenticated_client", lambda profile, timeout: None)
+
+    download_calls = []
+
+    def fake_download_via_browser(profile, url, timeout, headless=True):
+        download_calls.append(url)
+        return real_bytes
+    monkeypatch.setattr(browser_session, "download_via_browser", fake_download_via_browser)
+
+    resp = GicRatesResponsibility()
+    ctx = make_context(_db(tmp_path), tmp_path)
+    status = resp.run_automatic(ctx)
+
+    assert status == ResponsibilityStatus.COMPLETE
+    assert len(download_calls) == 1
+    assert "download=1" in download_calls[0]
+    assert download_calls[0].startswith(sharepoint_url.split("?")[0])

@@ -55,7 +55,7 @@ from __future__ import annotations
 from decimal import Decimal
 from pathlib import Path
 from typing import Callable
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -92,6 +92,22 @@ _XLSX_CONTENT_TYPE_MARKER = "spreadsheet"
 _XLSX_MAGIC = b"PK"  # xlsx is a zip archive
 
 
+def _force_sharepoint_download(url: str) -> str:
+    """SharePoint/OneDrive share links (":x:/t/..." Excel-Online-viewer style, or ":x:/r/...")
+    open the Excel Online web viewer by default rather than downloading the file — a real debug
+    bundle confirmed this is exactly what BrowserDownloadNotTriggeredError was catching. Appending
+    `download=1` is a normal, documented SharePoint/OneDrive query parameter — the same one their
+    own "Download a copy" UI button uses internally — that requests the raw file instead. Not a
+    bypass of anything; an ordinary, supported part of the URL scheme. No-op for non-SharePoint
+    URLs, so this is safe to apply unconditionally to whatever link was scraped or configured."""
+    if "sharepoint.com" not in url:
+        return url
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query))
+    query["download"] = "1"
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
 class GicRatesResponsibility(Responsibility):
     responsibility_id = "gic_rates"
     display_name = "GIC Rates"
@@ -118,7 +134,8 @@ class GicRatesResponsibility(Responsibility):
         regular failed attempt and falls through to the next tier."""
         if browser_profile:
             try:
-                content = browser_session.download_via_browser(browser_profile, url, timeout, headless=False)
+                content = browser_session.download_via_browser(
+                    browser_profile, _force_sharepoint_download(url), timeout, headless=False)
             except browser_session.BrowserDownloadNotTriggeredError as exc:
                 self._record_error(context, "collect_automatic", "SOURCE_LAYOUT_CHANGED",
                                     f"{url}: {exc}", severity="warning")
