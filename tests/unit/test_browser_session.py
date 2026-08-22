@@ -474,3 +474,15 @@ def test_download_via_browser_survives_transient_content_race(tmp_path, monkeypa
         browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
     assert browser.closed is True
     assert context.storage_state_calls  # still reached the "valid session" refresh afterward
+
+
+def test_browser_login_targets_lists_every_configured_source():
+    """Reads the real config/sources.yaml — gic_rates, money_market, treasury_bills, and hisa all
+    have automatic.browser_profile set to "igm_default"; this is what both the CLI and the UI's
+    sign-in prompt use to know what to offer, so it must reflect real config, not a fixture."""
+    targets = browser_session.browser_login_targets()
+    ids = {rid for rid, _profile, _url in targets}
+    assert {"gic_rates", "money_market", "treasury_bills", "hisa"} <= ids
+    for rid, profile, url in targets:
+        assert profile == "igm_default"
+        assert url.startswith("https://")

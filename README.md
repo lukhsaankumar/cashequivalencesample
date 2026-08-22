@@ -171,6 +171,12 @@ about this stores a password — see `SECURITY.md`'s "Persistent authenticated b
 section for exactly what is and isn't saved. Entirely optional: skip this and every source falls
 back to plain HTTP, then file/manual upload, exactly as before.
 
+The same sign-in is also available from the Dashboard page, in the "Browser-authenticated
+sources" panel above **Start a new run** — click **Sign in** next to a source and the same real,
+visible browser window opens (Playwright controls a separate native window, not something that
+renders inside the page itself). Fully optional and skippable there too; a new run starts
+regardless of whether any source is signed in.
+
 GIC Rates' and Treasury Bills' file downloads run with a **visible** browser window, deliberately
 — some tenants additionally require a corporate-managed-device certificate to reach SharePoint/
 similar resources, which only a real, visible browser negotiation (on a machine IT has actually

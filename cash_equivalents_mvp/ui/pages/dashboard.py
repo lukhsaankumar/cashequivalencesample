@@ -5,12 +5,64 @@ import datetime as dt
 
 import streamlit as st
 
+from cash_equivalents_mvp.collectors import browser_session
 from cash_equivalents_mvp.config import settings as app_settings
 from cash_equivalents_mvp.models import ResponsibilityStatus
 from cash_equivalents_mvp.orchestration.graph import build_registry
 from cash_equivalents_mvp.reporting.renderer_selection import select_renderer
 from cash_equivalents_mvp.ui import state
 from cash_equivalents_mvp.ui.components import card_end, card_start, metric_row, page_header, status_badge
+
+
+def _render_browser_session_panel() -> None:
+    """Optional, never blocking: lets a user sign in to whichever SSO-gated sources are
+    configured (see collectors/browser_session.py) directly from here instead of the CLI, before
+    starting a run. Signing in opens a real, visible browser window on this machine — the same
+    thing `cli browser-login` does, not something embeddable inside this page (Playwright controls
+    a separate native browser process, not a web page an iframe could show). Skipping this
+    entirely is always fine; every source falls back to file upload / manual entry exactly as
+    before if you never sign in."""
+    targets = browser_session.browser_login_targets()
+    if not targets:
+        return
+
+    signed_in_count = sum(1 for _rid, profile, _url in targets if browser_session.has_profile(profile))
+    with st.expander(f"Browser-authenticated sources ({signed_in_count}/{len(targets)} signed in) — optional",
+                      expanded=False):
+        st.caption(
+            "These sources can pull live data automatically once you've signed in here — this is "
+            "entirely optional. Signing in opens a real, visible browser window on this machine; "
+            "you type your own credentials directly into the real site, exactly like opening it "
+            "yourself. Nothing is stored by this app except the resulting session — see SECURITY.md."
+        )
+        for rid, profile, url in targets:
+            signed_in = browser_session.has_profile(profile)
+            c1, c2, c3 = st.columns([3, 2, 2])
+            with c1:
+                st.markdown(f"**{rid}**")
+                st.caption(url)
+            with c2:
+                st.markdown(status_badge("COMPLETE" if signed_in else "PENDING"), unsafe_allow_html=True)
+            with c3:
+                label = "Sign in again" if signed_in else "Sign in"
+                if st.button(label, key=f"browser_login_{rid}", width='stretch'):
+                    try:
+                        with st.spinner(f"Waiting for you to sign in for {rid} in the browser window "
+                                         f"that just opened..."):
+                            ok = browser_session.interactive_login(profile, url, timeout_seconds=300)
+                    except ImportError:
+                        st.error(
+                            "Browser sign-in isn't installed. Run "
+                            '`pip install -e ".[browser-auth]"` then `playwright install chromium`, '
+                            "then try again — see README.md's \"Automating SSO-gated sources\" section."
+                        )
+                    else:
+                        if ok:
+                            st.success(f"Signed in for {rid}. Refresh or reopen this panel to see the "
+                                       f"updated status.")
+                        else:
+                            st.warning(f"Timed out waiting for sign-in for {rid}. Click Sign in again if "
+                                       f"you still want to.")
 
 
 def render() -> None:
@@ -21,6 +73,8 @@ def render() -> None:
 
     _, renderer = select_renderer(app_settings()["renderer"]["preference"])
     renderer_ok = renderer is not None
+
+    _render_browser_session_panel()
 
     card_start("Start a new run")
     c1, c2, c3 = st.columns([2, 1, 1])

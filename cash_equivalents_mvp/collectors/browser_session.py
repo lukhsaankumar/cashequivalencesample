@@ -99,6 +99,25 @@ def _read_content_and_url(page, attempts: int = 6, delay_seconds: float = 1.5) -
     raise RuntimeError("unreachable: loop above always returns or re-raises")
 
 
+def browser_login_targets() -> list[tuple[str, str, str]]:
+    """Every configured source with automatic.browser_profile set, as (responsibility_id,
+    profile_name, login_url) — the URL a real request needs to reach to trigger that source's own
+    sign-in page. Shared by the CLI (`browser-login --source <id>`) and the UI's run-creation
+    sign-in prompt so both resolve sources.yaml the same way without duplicating the logic."""
+    from cash_equivalents_mvp.config import sources_config
+    targets = []
+    for rid, cfg in sources_config().items():
+        auto_cfg = cfg.get("automatic", {})
+        profile = auto_cfg.get("browser_profile")
+        if not profile:
+            continue
+        url = (auto_cfg.get("product_page_url") or auto_cfg.get("url") or auto_cfg.get("url_cad")
+               or cfg.get("reference_url"))
+        if url:
+            targets.append((rid, profile, url))
+    return targets
+
+
 def profile_path(profile_name: str) -> Path:
     return browser_profile_dir() / profile_name
 
