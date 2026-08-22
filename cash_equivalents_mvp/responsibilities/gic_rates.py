@@ -13,6 +13,21 @@ enough that a stale historical fixture is a worse default than a live pull):
      browser navigation (`browser_session.download_via_browser`) can, since it runs actual JS.
      Purely additive: if no browser profile has ever been created, every request below is
      identical to before.
+
+     KNOWN DEAD END, confirmed via a real debug bundle, not a guess: even with a valid session and
+     real browser navigation, both the dynamically-discovered and the static SharePoint links land
+     on `*.access.mcas.ms/aad_login?...requestedClientCert=true&IsManagedDevice-...=...` — MCAS's
+     device-trust check, which asks the browser to present a corporate-issued client certificate
+     proving the request comes from a managed device, not just an authenticated user. This is a
+     different, deeper security layer than a login wall (device identity, not user session) and
+     is not something this app will ever try to satisfy — doing so would mean extracting the real
+     corporate device certificate into an automation tool's browser context, i.e. actively working
+     around a managed-device control the organization deliberately put in place, which is a
+     materially different and more serious thing than reusing a user's own session cookie (see
+     SECURITY.md's "never bypasses authentication"). SOURCE_LAYOUT_CHANGED here (via
+     BrowserDownloadNotTriggeredError) is expected to recur every time; MANUAL_REQUIRED for GIC
+     Rates' web tiers is the correct, by-design outcome on a network where this policy applies,
+     not a bug to keep chasing.
   1. Fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml, linked from
      "Step by Step Cash And Equivalents.docx") and scrape it for a link to the current rate file,
      then download and parse that. Tried *first*, not as a fallback, because it's re-discovered
@@ -94,10 +109,16 @@ class GicRatesResponsibility(Responsibility):
         If browser_profile is set, tries real browser navigation first (download_via_browser) —
         a plain cookie-jar GET can't complete a SharePoint MCAS session hand-off, which requires
         executing client-side JS (see browser_session.download_via_browser docstring); only falls
-        through to the get_fn-based path below if no browser profile has been created yet."""
+        through to the get_fn-based path below if no browser profile has been created yet.
+
+        Runs headless=False (a visible window) deliberately, not headless=True — MCAS's device-
+        trust check needs a real OS-level TLS client-certificate negotiation, which a headless
+        browser has no way to complete (see download_via_browser's docstring). Only meaningful on
+        a machine IT has actually enrolled; on any other machine this behaves exactly like a
+        regular failed attempt and falls through to the next tier."""
         if browser_profile:
             try:
-                content = browser_session.download_via_browser(browser_profile, url, timeout)
+                content = browser_session.download_via_browser(browser_profile, url, timeout, headless=False)
             except browser_session.BrowserDownloadNotTriggeredError as exc:
                 self._record_error(context, "collect_automatic", "SOURCE_LAYOUT_CHANGED",
                                     f"{url}: {exc}", severity="warning")

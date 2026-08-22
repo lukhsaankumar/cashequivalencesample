@@ -187,6 +187,36 @@ before handing off a machine, or any time you want to force a fresh interactive 
 completely unaffected if you never do either — `config/sources.yaml`'s `browser_profile` keys are
 inert until a matching profile actually exists on disk.
 
+**A device-trust check, handled without ever touching the certificate itself:** GIC Rates' (and
+Treasury Bills') file fetch can hit
+`*.access.mcas.ms/aad_login?...requestedClientCert=true&IsManagedDevice-...=...`, confirmed via a
+real debug bundle. This is Microsoft Defender for Cloud Apps' **device-trust check**: it asks the
+browser to present a corporate-issued client certificate proving the request comes from a managed
+device, not just an authenticated user — a different, deeper layer than the session/cookie login
+wall the rest of this section deals with.
+
+There's an important, precise line here. This application will **never** extract, copy, or move a
+device certificate out of its real home in the machine's protected certificate store into an
+automation tool's own browser context — that would mean actively working around a managed-device
+control the organization deliberately put in place, categorically different from (and more
+serious than) reusing a user's own session cookie, and it will never be built.
+
+What it *does* do: `download_via_browser(..., headless=False)` opens a real, **visible** browser
+window on the machine actually running it. If that machine is one your organization has enrolled,
+the certificate the check is asking for is already sitting in that machine's own certificate
+store — the same one real Chrome/Edge on that machine already use, including, where IT has
+pre-configured silent selection, without ever showing you a picker dialog. A hidden/headless
+browser has no window to negotiate through and no chance at this at all; a visible one gets the
+same shot at it any other browser on that machine gets. Nothing is copied, exported, or moved —
+the automation is just running as a normal local process on a machine that may already have what
+the check wants, exactly like opening a second browser window would.
+
+This has a real, hard boundary that no code change alters: it only works on a machine your
+organization has actually enrolled. On a generic cloud/Linux host, a VM nobody registered with
+IT, or any machine without that certificate, this fails exactly the same way it always did —
+correctly, since there is genuinely nothing there to negotiate. `MANUAL_REQUIRED` in that case is
+the correct, by-design outcome, not a gap to close.
+
 ## Known gaps (tracked, not silently ignored)
 
 - The Streamlit app has no authentication of its own — it's designed to run on `localhost` for a

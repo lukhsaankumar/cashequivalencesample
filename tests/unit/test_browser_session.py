@@ -143,6 +143,7 @@ class _FakeBrowser:
         self._context = context
         self.closed = False
         self.new_context_calls: list[dict] = []
+        self.launch_calls: list[dict] = []
 
     def new_context(self, **kw):
         self.new_context_calls.append(kw)
@@ -153,13 +154,16 @@ class _FakeBrowser:
 
 
 class _FakeSyncPlaywrightCM:
-    """Stands in for `with sync_playwright() as p: ...` — p.chromium.launch(...) returns the
-    single scripted fake browser regardless of headless=True/False."""
+    """Stands in for `with sync_playwright() as p: ...` — p.chromium.launch(...) records its
+    kwargs (e.g. headless=) on the single scripted fake browser and returns it regardless."""
     def __init__(self, browser):
         self._browser = browser
 
     def __enter__(self):
-        chromium = type("_Chromium", (), {"launch": lambda self_, **kw: self._browser})()
+        def _launch(self_, **kw):
+            self._browser.launch_calls.append(kw)
+            return self._browser
+        chromium = type("_Chromium", (), {"launch": _launch})()
         return type("_Playwright", (), {"chromium": chromium})()
 
     def __exit__(self, *exc_info):
@@ -358,3 +362,30 @@ def test_download_via_browser_raises_not_triggered_for_real_non_login_content(tm
         browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
     assert browser.closed is True
     assert context.storage_state_calls  # session is valid, just refreshed as normal
+
+
+def test_download_via_browser_defaults_to_headless_true(tmp_path, monkeypatch):
+    _seed_profile(monkeypatch, tmp_path)
+    dl_dir = tmp_path / "downloads"
+    dl_dir.mkdir()
+    page = _FakeDownloadPage(download_content=b"bytes", dest_dir=dl_dir)
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
+
+    assert browser.launch_calls == [{"headless": True}]
+
+
+def test_download_via_browser_threads_through_headless_false(tmp_path, monkeypatch):
+    """Regression test: gic_rates.py deliberately passes headless=False for the SharePoint
+    download so a real, visible browser window gets a chance at MCAS's device-trust client-
+    certificate negotiation, which a headless browser has no way to complete at all."""
+    _seed_profile(monkeypatch, tmp_path)
+    dl_dir = tmp_path / "downloads"
+    dl_dir.mkdir()
+    page = _FakeDownloadPage(download_content=b"bytes", dest_dir=dl_dir)
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx", headless=False)
+
+    assert browser.launch_calls == [{"headless": False}]

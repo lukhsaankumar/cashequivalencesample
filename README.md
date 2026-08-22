@@ -162,12 +162,22 @@ python -m cash_equivalents_mvp.cli browser-login --source gic_rates
 
 The last command opens a visible browser window — sign in exactly as you normally would (password,
 MFA); the window closes itself once you're past the login page. All four sources share one saved
-profile (`igm_default` in `config/sources.yaml`), so this one login covers all of them. Check
-status any time with `cli browser-status`; clear a saved session with
-`cli browser-logout --profile igm_default`. Nothing about this stores a password — see
-`SECURITY.md`'s "Persistent authenticated browser sessions" section for exactly what is and isn't
-saved. Entirely optional: skip this and every source falls back to plain HTTP, then file/manual
-upload, exactly as before.
+profile (`igm_default` in `config/sources.yaml`), but each source's own site needs its own sign-in
+the first time (a session established for gic_rates doesn't cover a different domain like
+digital.lipperweb.com or nbin.ca — run `browser-login --source <id>` once per source; each login
+adds to the saved profile rather than replacing it). Check status any time with `cli
+browser-status`; clear all saved sessions with `cli browser-logout --profile igm_default`. Nothing
+about this stores a password — see `SECURITY.md`'s "Persistent authenticated browser sessions"
+section for exactly what is and isn't saved. Entirely optional: skip this and every source falls
+back to plain HTTP, then file/manual upload, exactly as before.
+
+GIC Rates' and Treasury Bills' file downloads run with a **visible** browser window, deliberately
+— some tenants additionally require a corporate-managed-device certificate to reach SharePoint/
+similar resources, which only a real, visible browser negotiation (on a machine IT has actually
+enrolled) has any chance of completing; a hidden/headless browser can't participate in that
+negotiation at all. This only works when run on a machine your organization has enrolled — it will
+never work on a generic cloud/Linux host with no device enrollment, and no code change can make it
+work there, since the certificate itself doesn't exist on such a machine. See SECURITY.md.
 
 ## How to generate a debug bundle
 
@@ -177,9 +187,15 @@ environment info for offline diagnosis.
 
 ## Known limitations
 
-- Money Market, HISA, and the SharePoint copy of GIC Rates require either the IG corporate VPN +
-  a plain authenticated request, or the optional browser-session setup above — see
-  `ASSUMPTIONS.md` and "Automating SSO-gated sources" above.
+- Money Market and HISA are automatable with the optional browser-session setup above (Money
+  Market confirmed working end-to-end). GIC Rates' and Treasury Bills' file downloads can hit
+  Microsoft Defender for Cloud Apps' device-trust check (a corporate-managed-device certificate
+  requirement, not a login wall) — handled with a visible (not hidden) browser window so a real,
+  IT-enrolled machine gets a fair shot at it, but this only ever works on a machine your
+  organization has actually enrolled; see SECURITY.md for exactly what is and isn't attempted.
+  Treasury Bills' NBIN scrape is also unverified against NBIN's real authenticated page structure
+  (never captured before this) — a first attempt will likely need a follow-up fix once real
+  evidence comes back, the same way Money Market's did.
 - The Fed Funds `UPPER_BOUND` rule and the HISA "highest rate" product selection are both flagged
   `UNCONFIRMED_BUSINESS_RULE` — real business decisions inferred from the historical example, not
   confirmed in writing.

@@ -232,7 +232,8 @@ def render_authenticated_page(profile_name: str, url: str, timeout_seconds: floa
     return html
 
 
-def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 30) -> bytes | None:
+def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 30,
+                          headless: bool = True) -> bytes | None:
     """Downloads a file by real browser navigation (JS executed) using the saved session, rather
     than a static cookie-jar HTTP request. Necessary for sources that complete their session hand-
     off via client-side JavaScript rather than a plain HTTP redirect — a real debug bundle showed
@@ -241,6 +242,19 @@ def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 3
     `*.access.mcas.ms` to finish establishing the session. A real browser executes that JS and
     continues on automatically; a plain `httpx` GET with extracted cookies just receives that raw
     HTML and stops there — the session was fine, the *mechanism* couldn't finish the hop.
+
+    headless=False matters for MCAS's further device-trust check (`requestedClientCert=true`):
+    a corporate-managed Windows machine has a device certificate sitting in the OS certificate
+    store, and real Chrome/Edge negotiate it via the native OS TLS stack — including, on a machine
+    where IT has pre-configured silent selection, without ever showing a picker dialog. A headless
+    browser has no way to complete that negotiation (there's no window for a picker, and no UI
+    thread to silently satisfy the request through), so it never even gets the chance — this has
+    nothing to do with whether the underlying certificate exists. headless=False lets a real,
+    visible Chromium window run on the same machine, giving it the same shot at that negotiation
+    any other browser on that machine gets. This only matters if the browser genuinely runs on a
+    machine IT has enrolled — see gic_rates.py and SECURITY.md for what this can't do (it cannot,
+    and must never try to, make a certificate exist on a machine that doesn't have one, e.g. a
+    generic cloud/Linux host with no device enrollment at all).
 
     Returns the downloaded bytes, or None if no profile has been created yet (feature not set up).
 
@@ -256,7 +270,7 @@ def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 3
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=headless)
         context = browser.new_context(storage_state=str(_state_path(profile_name)), accept_downloads=True)
         page = context.new_page()
         try:

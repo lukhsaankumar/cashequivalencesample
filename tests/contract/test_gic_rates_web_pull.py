@@ -206,9 +206,12 @@ def test_browser_session_tried_first_when_profile_configured(monkeypatch, tmp_pa
     fake_client = _FakeAuthenticatedClient({product_url: _fake_html_login_response(product_page_html)})
     download_calls = []
 
-    def fake_download_via_browser(profile, url, timeout):
+    def fake_download_via_browser(profile, url, timeout, headless=True):
         download_calls.append(url)
         assert url == xlsx_url
+        # Deliberately headless=False — MCAS's device-trust check needs a real, visible browser
+        # window to negotiate a client certificate; headless has no way to do that at all.
+        assert headless is False
         return real_bytes
 
     def fail_plain_http(url, **kw):
