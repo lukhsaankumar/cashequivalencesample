@@ -189,9 +189,11 @@ class _FakeAuthenticatedClient:
 
 def test_browser_session_tried_first_when_profile_configured(monkeypatch, tmp_path):
     """config/sources.yaml sets gic_rates.automatic.browser_profile — when a saved session exists
-    (cli browser-login was run), it must be used for every request in tiers 1-2 in preference to
-    plain httpx.get, since a real debug bundle proved plain httpx can never get past this
-    source's SSO wall at all."""
+    (cli browser-login was run): the product-page scrape uses the saved cookies (a plain httpx GET
+    can't get past gic-tca.shtml's SSO wall at all), and the file download uses real browser
+    navigation (a plain cookie-jar GET can't complete a SharePoint MCAS session hand-off, which
+    requires executing client-side JS — see browser_session.download_via_browser's docstring for
+    the real debug-bundle evidence)."""
     real_gic_file = source_material_dir() / "GIC Rates.xlsx"
     if not real_gic_file.exists():
         pytest.skip("source_material/GIC Rates.xlsx not present")
@@ -201,23 +203,28 @@ def test_browser_session_tried_first_when_profile_configured(monkeypatch, tmp_pa
     xlsx_url = "https://home.investorsgroup.com/Content/en/products/pr/current-gic-rates.xlsx"
     product_page_html = f'<html><body><a href="{xlsx_url}">Current GIC Rates</a></body></html>'
 
-    fake_client = _FakeAuthenticatedClient({
-        product_url: _fake_html_login_response(product_page_html),
-        xlsx_url: _fake_xlsx_response(content=real_bytes),
-    })
+    fake_client = _FakeAuthenticatedClient({product_url: _fake_html_login_response(product_page_html)})
+    download_calls = []
+
+    def fake_download_via_browser(profile, url, timeout):
+        download_calls.append(url)
+        assert url == xlsx_url
+        return real_bytes
 
     def fail_plain_http(url, **kw):
         raise AssertionError(f"plain httpx.get must not be called when a browser session is available: {url}")
     monkeypatch.setattr(httpx, "get", fail_plain_http)
     monkeypatch.setattr(browser_session, "has_profile", lambda name: True)
     monkeypatch.setattr(browser_session, "authenticated_client", lambda profile, timeout: fake_client)
+    monkeypatch.setattr(browser_session, "download_via_browser", fake_download_via_browser)
 
     resp = GicRatesResponsibility()
     ctx = make_context(_db(tmp_path), tmp_path)
     status = resp.run_automatic(ctx)
 
     assert status == ResponsibilityStatus.COMPLETE
-    assert fake_client.calls == [product_url, xlsx_url]
+    assert fake_client.calls == [product_url]  # scrape only — download went through the browser instead
+    assert download_calls == [xlsx_url]
     assert fake_client.closed is True
     artifacts = ctx.db.get_artifacts(ctx.run_id)
     web_artifact = next(a for a in artifacts if a.responsibility_id == "gic_rates")

@@ -5,6 +5,8 @@ never pay any cost for this feature existing) — see money_market.py / gic_rate
 """
 from __future__ import annotations
 
+import pytest
+
 from cash_equivalents_mvp.collectors import browser_session
 
 # tests/conftest.py's autouse `_no_real_browser_profile` fixture stubs has_profile() to always
@@ -164,6 +166,10 @@ class _FakeSyncPlaywrightCM:
         return False
 
 
+class _FakePlaywrightTimeoutError(Exception):
+    pass
+
+
 def _install_fake_playwright(monkeypatch, page):
     import sys
     import types
@@ -172,10 +178,65 @@ def _install_fake_playwright(monkeypatch, page):
 
     fake_module = types.ModuleType("playwright.sync_api")
     fake_module.sync_playwright = lambda: _FakeSyncPlaywrightCM(browser)
+    fake_module.TimeoutError = _FakePlaywrightTimeoutError
     monkeypatch.setitem(sys.modules, "playwright.sync_api", fake_module)
     if "playwright" not in sys.modules:
         monkeypatch.setitem(sys.modules, "playwright", types.ModuleType("playwright"))
     return context, browser
+
+
+class _FakeExpectDownload:
+    """Stands in for `with page.expect_download() as download_info: ...` — .value returns the
+    scripted download, or raises the scripted (fake) PlaywrightTimeoutError if none was set,
+    matching how a real "no download ever fired" case surfaces."""
+    def __init__(self, download=None, error=None):
+        self._download = download
+        self._error = error
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    @property
+    def value(self):
+        if self._error is not None:
+            raise self._error
+        return self._download
+
+
+class _FakeDownload:
+    def __init__(self, content: bytes, dest_dir):
+        self._path = dest_dir / "downloaded.xlsx"
+        self._path.write_bytes(content)
+
+    def path(self):
+        return str(self._path)
+
+
+class _FakeDownloadPage:
+    """Page double for download_via_browser — goto() is a no-op; expect_download() returns
+    whatever outcome the test scripted (a real download, or a timeout meaning none fired), and
+    content()/url reflect what the page would show if no download happened."""
+    def __init__(self, *, download_content: bytes | None = None, dest_dir=None,
+                 final_url: str = "", final_html: str = ""):
+        self.url = final_url
+        self._html = final_html
+        if download_content is not None:
+            self._expect_download_result = _FakeExpectDownload(
+                download=_FakeDownload(download_content, dest_dir))
+        else:
+            self._expect_download_result = _FakeExpectDownload(error=_FakePlaywrightTimeoutError("no download"))
+
+    def goto(self, url, **kw):
+        pass
+
+    def expect_download(self, timeout=None):
+        return self._expect_download_result
+
+    def content(self):
+        return self._html
 
 
 def test_interactive_login_survives_transient_content_race_during_sso_redirect(tmp_path, monkeypatch):
@@ -234,3 +295,66 @@ def test_interactive_login_loads_existing_session_before_saving_a_new_one(tmp_pa
     # this is what makes the saved storage_state() at the end a union of both sources' cookies
     # instead of a wholesale replacement.
     assert browser.new_context_calls == [{"storage_state": str(existing_state_path)}]
+
+
+def _seed_profile(monkeypatch, tmp_path):
+    monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
+    monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
+    profile_dir = tmp_path / "igm_default"
+    profile_dir.mkdir()
+    (profile_dir / "state.json").write_text('{"cookies": [], "origins": []}')
+
+
+def test_download_via_browser_returns_none_when_no_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(browser_session, "has_profile", _REAL_HAS_PROFILE)
+    monkeypatch.setattr(browser_session, "browser_profile_dir", lambda: tmp_path)
+    assert browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx") is None
+
+
+def test_download_via_browser_returns_bytes_on_real_download(tmp_path, monkeypatch):
+    _seed_profile(monkeypatch, tmp_path)
+    dl_dir = tmp_path / "downloads"
+    dl_dir.mkdir()
+    page = _FakeDownloadPage(download_content=b"PK\x03\x04fake-xlsx-bytes", dest_dir=dl_dir)
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    result = browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
+
+    assert result == b"PK\x03\x04fake-xlsx-bytes"
+    assert context.storage_state_calls  # session refreshed after a successful use
+    assert browser.closed is True
+
+
+def test_download_via_browser_raises_session_expired_when_login_page_reached(tmp_path, monkeypatch):
+    """No download fired AND the page we landed on is a real login page — a real code fix
+    (browser-login) is what's needed, not a retry."""
+    _seed_profile(monkeypatch, tmp_path)
+    page = _FakeDownloadPage(
+        download_content=None,
+        final_url="https://login.microsoftonline.com/tenant/oauth2/authorize",
+        final_html="<html>sign in</html>",
+    )
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    with pytest.raises(browser_session.BrowserSessionExpiredError):
+        browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
+    assert browser.closed is True
+    assert not context.storage_state_calls  # an expired session must not be re-saved as if valid
+
+
+def test_download_via_browser_raises_not_triggered_for_real_non_login_content(tmp_path, monkeypatch):
+    """No download fired, but we landed on real, non-login content (e.g. a SharePoint Excel
+    Online viewer page) — the session is fine, the link just isn't a raw downloadable file, so
+    this must be distinguishable from BrowserSessionExpiredError."""
+    _seed_profile(monkeypatch, tmp_path)
+    page = _FakeDownloadPage(
+        download_content=None,
+        final_url="https://446346262425.sharepoint.com/:x:/t/IGInvestmentProduct/abc123",
+        final_html="<html>Excel Online viewer content, not a login page</html>",
+    )
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    with pytest.raises(browser_session.BrowserDownloadNotTriggeredError):
+        browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
+    assert browser.closed is True
+    assert context.storage_state_calls  # session is valid, just refreshed as normal

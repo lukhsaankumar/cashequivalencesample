@@ -57,6 +57,14 @@ class BrowserSessionExpiredError(Exception):
     refreshing via `cli browser-login`, not a code fix."""
 
 
+class BrowserDownloadNotTriggeredError(Exception):
+    """The saved session is valid (no login page reached) but navigating to the URL didn't
+    trigger a browser download either — e.g. a SharePoint share link in Excel Online's "viewer"
+    format renders an embedded spreadsheet UI instead of downloading a file. Distinct from an
+    expired session: retrying this one via `cli browser-login` won't change the outcome, since
+    the session isn't the problem — the link itself isn't a raw downloadable file."""
+
+
 def profile_path(profile_name: str) -> Path:
     return browser_profile_dir() / profile_name
 
@@ -222,3 +230,66 @@ def render_authenticated_page(profile_name: str, url: str, timeout_seconds: floa
             f"has expired. Run: python -m cash_equivalents_mvp.cli browser-login --source <id>"
         )
     return html
+
+
+def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 30) -> bytes | None:
+    """Downloads a file by real browser navigation (JS executed) using the saved session, rather
+    than a static cookie-jar HTTP request. Necessary for sources that complete their session hand-
+    off via client-side JavaScript rather than a plain HTTP redirect — a real debug bundle showed
+    a SharePoint fetch land on a Microsoft Defender for Cloud Apps (MCAS) reverse-proxy page: an
+    auto-submitting HTML form (`document.forms[0].submit()`) that POSTs a token to
+    `*.access.mcas.ms` to finish establishing the session. A real browser executes that JS and
+    continues on automatically; a plain `httpx` GET with extracted cookies just receives that raw
+    HTML and stops there — the session was fine, the *mechanism* couldn't finish the hop.
+
+    Returns the downloaded bytes, or None if no profile has been created yet (feature not set up).
+
+    Raises BrowserSessionExpiredError if navigation lands on a real login page (the session
+    genuinely doesn't work), or BrowserDownloadNotTriggeredError if navigation completes to a real,
+    non-login page but no file download ever fires — e.g. a SharePoint share link in Excel
+    Online's "viewer" format (`:x:/t/...` / `:x:/r/...`) renders an embedded spreadsheet UI instead
+    of downloading a file. That distinction matters: the second case isn't fixed by signing in
+    again, since the session isn't what's wrong."""
+    if not has_profile(profile_name):
+        return None
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(storage_state=str(_state_path(profile_name)), accept_downloads=True)
+        page = context.new_page()
+        try:
+            with page.expect_download(timeout=timeout_seconds * 1000) as download_info:
+                try:
+                    page.goto(url, timeout=timeout_seconds * 1000)
+                except PlaywrightTimeoutError:
+                    # goto() can itself time out when the navigation is aborted in favor of a
+                    # download partway through — expect_download() below is the real signal.
+                    pass
+            download = download_info.value
+        except PlaywrightTimeoutError:
+            # No download event fired within the timeout — real page content instead. Distinguish
+            # "genuinely not signed in" from "signed in fine, this link just isn't a raw file".
+            html = page.content()
+            final_url = page.url
+            expired = is_login_page(final_url, html)
+            if not expired:
+                _refresh_state(profile_name, context)
+            browser.close()
+            if expired:
+                raise BrowserSessionExpiredError(
+                    f"{url} redirected to a login page — the saved session for profile "
+                    f"{profile_name!r} has expired. Run: python -m cash_equivalents_mvp.cli "
+                    f"browser-login --source <id>"
+                ) from None
+            raise BrowserDownloadNotTriggeredError(
+                f"{url} did not trigger a file download (landed on {final_url} instead) — it may "
+                f"be a viewer/preview link rather than a raw downloadable file."
+            ) from None
+
+        path = download.path()
+        content = Path(path).read_bytes() if path else None
+        _refresh_state(profile_name, context)
+        browser.close()
+        return content

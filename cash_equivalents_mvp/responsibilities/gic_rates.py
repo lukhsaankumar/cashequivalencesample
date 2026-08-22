@@ -4,11 +4,15 @@ Automatic collection order — dynamic web pull first, file/fixture fallback onl
 for a reason outside our control (per master prompt §7.3, and because GIC rates change often
 enough that a stale historical fixture is a worse default than a live pull):
   0. If a persistent browser session has been set up for this source (`cli browser-login
-     --source gic_rates` — see collectors/browser_session.py), use its saved cookies for every
-     request in tiers 1-2 below. A real debug bundle proved gic-tca.shtml redirects an
-     unauthenticated request straight to Microsoft/Entra ID SSO — a plain httpx.get() cannot
-     get past that no matter how it's tuned; this is the only way past it. Purely additive: if no
-     browser profile has ever been created, every request below is identical to before.
+     --source gic_rates` — see collectors/browser_session.py), use its saved cookies for the
+     product-page fetch in tier 1, and real browser navigation (JS executed) for the file download
+     in tiers 1-2. A real debug bundle proved gic-tca.shtml redirects an unauthenticated request
+     straight to Microsoft/Entra ID SSO, and that the SharePoint file fetch separately involves a
+     Microsoft Defender for Cloud Apps (MCAS) session hand-off completed via client-side JS
+     (an auto-submitting HTML form) that a plain httpx.get() with cookies can't execute — real
+     browser navigation (`browser_session.download_via_browser`) can, since it runs actual JS.
+     Purely additive: if no browser profile has ever been created, every request below is
+     identical to before.
   1. Fetch the public GIC product page (home.investorsgroup.com/.../gic-tca.shtml, linked from
      "Step by Step Cash And Equivalents.docx") and scrape it for a link to the current rate file,
      then download and parse that. Tried *first*, not as a fallback, because it's re-discovered
@@ -79,10 +83,35 @@ class GicRatesResponsibility(Responsibility):
     dependencies = ()
 
     def _download_xlsx(self, context: RunContext, url: str, timeout: float,
-                        get_fn: Callable = httpx.get, using_browser_session: bool = False) -> Path | None:
-        """Downloads url and returns a saved path only if the response actually looks like an
-        xlsx file — a SharePoint link without a valid session typically 200s with an HTML login
-        page instead of erroring, which would otherwise crash the parser with a confusing error."""
+                        get_fn: Callable = httpx.get, using_browser_session: bool = False,
+                        browser_profile: str | None = None) -> tuple[Path | None, bool]:
+        """Downloads url and returns (saved path, used_browser_download) — the saved path is only
+        set if the response actually looks like an xlsx file (a SharePoint link without a valid
+        session typically 200s with an HTML login page instead of erroring, which would otherwise
+        crash the parser with a confusing error); used_browser_download tells the caller whether
+        real browser navigation (not just a cookie-jar GET) is what actually produced it.
+
+        If browser_profile is set, tries real browser navigation first (download_via_browser) —
+        a plain cookie-jar GET can't complete a SharePoint MCAS session hand-off, which requires
+        executing client-side JS (see browser_session.download_via_browser docstring); only falls
+        through to the get_fn-based path below if no browser profile has been created yet."""
+        if browser_profile:
+            try:
+                content = browser_session.download_via_browser(browser_profile, url, timeout)
+            except browser_session.BrowserDownloadNotTriggeredError as exc:
+                self._record_error(context, "collect_automatic", "SOURCE_LAYOUT_CHANGED",
+                                    f"{url}: {exc}", severity="warning")
+                return None, False
+            # BrowserSessionExpiredError intentionally not caught here — propagates to
+            # collect_automatic, which downgrades every remaining tier to plain HTTP.
+            if content is not None:
+                dest_dir = raw_sources_dir() / context.run_id
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / "gic_rates_web.xlsx"
+                dest.write_bytes(content)
+                return dest, True
+            # content is None -> no browser profile created yet -> fall through to get_fn below
+
         try:
             resp = get_fn(url, timeout=timeout, follow_redirects=True)
             resp.raise_for_status()
@@ -90,7 +119,7 @@ class GicRatesResponsibility(Responsibility):
             code, retryable = classify_http_exception(exc)
             self._record_error(context, "collect_automatic", code, describe_failure(url, exc),
                                 severity="warning", retryable=retryable, exc=exc)
-            return None
+            return None, False
 
         content_type = resp.headers.get("content-type", "")
         looks_like_xlsx = _XLSX_CONTENT_TYPE_MARKER in content_type or resp.content[:2] == _XLSX_MAGIC
@@ -118,13 +147,13 @@ class GicRatesResponsibility(Responsibility):
                 f"SharePoint/SSO login page. Requires an authenticated session.",
                 severity="warning",
             )
-            return None
+            return None, False
 
         dest_dir = raw_sources_dir() / context.run_id
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / "gic_rates_web.xlsx"
         dest.write_bytes(resp.content)
-        return dest
+        return dest, False
 
     def _find_rates_link_on_product_page(self, context: RunContext, page_url: str, timeout: float,
                                           get_fn: Callable = httpx.get,
@@ -211,29 +240,36 @@ class GicRatesResponsibility(Responsibility):
             except browser_session.BrowserSessionExpiredError:
                 # Already logged inside the helper. Downgrade to plain HTTP for every remaining
                 # tier rather than retrying the same known-expired session again below.
-                get_fn, using_browser_session, link = httpx.get, False, None
+                get_fn, using_browser_session, browser_profile, link = httpx.get, False, None, None
             if link:
+                used_browser_download = False
                 try:
-                    web_path = self._download_xlsx(context, link, timeout,
-                                                     get_fn=get_fn, using_browser_session=using_browser_session)
+                    web_path, used_browser_download = self._download_xlsx(
+                        context, link, timeout, get_fn=get_fn,
+                        using_browser_session=using_browser_session, browser_profile=browser_profile)
                 except browser_session.BrowserSessionExpiredError:
-                    get_fn, using_browser_session, web_path = httpx.get, False, None
+                    get_fn, using_browser_session, browser_profile, web_path = httpx.get, False, None, None
                 if web_path:
-                    web_method = "web_scraped_authenticated" if using_browser_session else "web_scraped"
+                    web_method = ("web_scraped_authenticated" if (using_browser_session or used_browser_download)
+                                  else "web_scraped")
                     web_source_url = link
 
         if web_path is None:
             sharepoint_url = auto_cfg.get("sharepoint_url")
             if sharepoint_url:
+                used_browser_download = False
                 try:
-                    web_path = self._download_xlsx(context, sharepoint_url, timeout,
-                                                     get_fn=get_fn, using_browser_session=using_browser_session)
+                    web_path, used_browser_download = self._download_xlsx(
+                        context, sharepoint_url, timeout, get_fn=get_fn,
+                        using_browser_session=using_browser_session, browser_profile=browser_profile)
                 except browser_session.BrowserSessionExpiredError:
-                    get_fn, using_browser_session = httpx.get, False
-                    web_path = self._download_xlsx(context, sharepoint_url, timeout,
-                                                     get_fn=get_fn, using_browser_session=using_browser_session)
+                    get_fn, using_browser_session, browser_profile = httpx.get, False, None
+                    web_path, used_browser_download = self._download_xlsx(
+                        context, sharepoint_url, timeout, get_fn=get_fn,
+                        using_browser_session=using_browser_session, browser_profile=browser_profile)
                 if web_path:
-                    web_method = ("sharepoint_direct_fallback_authenticated" if using_browser_session
+                    web_method = ("sharepoint_direct_fallback_authenticated"
+                                  if (using_browser_session or used_browser_download)
                                   else "sharepoint_direct_fallback")
                     web_source_url = sharepoint_url
 
