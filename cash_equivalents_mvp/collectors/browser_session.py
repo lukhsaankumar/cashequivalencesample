@@ -65,6 +65,26 @@ class BrowserDownloadNotTriggeredError(Exception):
     the session isn't the problem — the link itself isn't a raw downloadable file."""
 
 
+def _read_content_and_url(page, attempts: int = 6, delay_seconds: float = 1.5) -> tuple[str, str]:
+    """page.content() can transiently raise ("Page.content: Unable to retrieve content because
+    the page is navigating and changing the content") when read right as a navigation is still in
+    flight — real evidence of this hitting a real user mid multi-hop SSO/MCAS redirect chain (see
+    interactive_login's own, differently-shaped fix for the same underlying race). Unlike
+    interactive_login (which is already inside a polling loop with its own timeout budget), the
+    one-shot callers below have no outer loop to fall back on, so this retries briefly on its own
+    rather than letting one unlucky read crash the whole call. Raises the last exception if content
+    still can't be read after every attempt — a real, non-transient failure at that point."""
+    for attempt in range(attempts):
+        try:
+            html = page.content()
+            return html, page.url
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay_seconds)
+    raise RuntimeError("unreachable: loop above always returns or re-raises")
+
+
 def profile_path(profile_name: str) -> Path:
     return browser_profile_dir() / profile_name
 
@@ -217,8 +237,7 @@ def render_authenticated_page(profile_name: str, url: str, timeout_seconds: floa
         context = browser.new_context(storage_state=str(_state_path(profile_name)))
         page = context.new_page()
         page.goto(url, wait_until="networkidle", timeout=timeout_seconds * 1000)
-        html = page.content()
-        final_url = page.url
+        html, final_url = _read_content_and_url(page)
         expired = is_login_page(final_url, html)
         if not expired:
             _refresh_state(profile_name, context)
@@ -285,8 +304,7 @@ def download_via_browser(profile_name: str, url: str, timeout_seconds: float = 3
         except PlaywrightTimeoutError:
             # No download event fired within the timeout — real page content instead. Distinguish
             # "genuinely not signed in" from "signed in fine, this link just isn't a raw file".
-            html = page.content()
-            final_url = page.url
+            html, final_url = _read_content_and_url(page)
             expired = is_login_page(final_url, html)
             if not expired:
                 _refresh_state(profile_name, context)

@@ -222,11 +222,14 @@ class _FakeDownload:
 class _FakeDownloadPage:
     """Page double for download_via_browser — goto() is a no-op; expect_download() returns
     whatever outcome the test scripted (a real download, or a timeout meaning none fired), and
-    content()/url reflect what the page would show if no download happened."""
+    content()/url reflect what the page would show if no download happened. content_raises_before_
+    success lets a test simulate the transient "page is navigating" race that content() can hit."""
     def __init__(self, *, download_content: bytes | None = None, dest_dir=None,
-                 final_url: str = "", final_html: str = ""):
+                 final_url: str = "", final_html: str = "", content_raises_before_success: int = 0):
         self.url = final_url
         self._html = final_html
+        self._content_calls = 0
+        self._content_raises_before_success = content_raises_before_success
         if download_content is not None:
             self._expect_download_result = _FakeExpectDownload(
                 download=_FakeDownload(download_content, dest_dir))
@@ -240,6 +243,10 @@ class _FakeDownloadPage:
         return self._expect_download_result
 
     def content(self):
+        self._content_calls += 1
+        if self._content_calls <= self._content_raises_before_success:
+            raise RuntimeError("Page.content: Unable to retrieve content because the page is "
+                                "navigating and changing the content.")
         return self._html
 
 
@@ -389,3 +396,59 @@ def test_download_via_browser_threads_through_headless_false(tmp_path, monkeypat
     browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx", headless=False)
 
     assert browser.launch_calls == [{"headless": False}]
+
+
+def test_read_content_and_url_retries_transient_failures(monkeypatch):
+    monkeypatch.setattr(browser_session.time, "sleep", lambda s: None)
+
+    class _FlakyPage:
+        url = "https://example.test/final"
+        calls = 0
+
+        def content(self):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("Page.content: Unable to retrieve content because the page is "
+                                    "navigating and changing the content.")
+            return "<html>ok</html>"
+
+    page = _FlakyPage()
+    html, url = browser_session._read_content_and_url(page)
+    assert html == "<html>ok</html>"
+    assert url == "https://example.test/final"
+    assert page.calls == 3
+
+
+def test_read_content_and_url_raises_after_exhausting_attempts(monkeypatch):
+    monkeypatch.setattr(browser_session.time, "sleep", lambda s: None)
+
+    class _AlwaysFlakyPage:
+        url = "https://example.test/final"
+
+        def content(self):
+            raise RuntimeError("always fails")
+
+    with pytest.raises(RuntimeError, match="always fails"):
+        browser_session._read_content_and_url(_AlwaysFlakyPage(), attempts=3)
+
+
+def test_download_via_browser_survives_transient_content_race(tmp_path, monkeypatch):
+    """Regression test for a real crash: a user hit the exact same "page is navigating" race
+    inside download_via_browser (this time on a real GIC Rates SharePoint fetch) that
+    interactive_login was already fixed for — download_via_browser had its own unguarded
+    page.content() call that let the same transient exception crash the whole download attempt
+    instead of retrying."""
+    monkeypatch.setattr(browser_session.time, "sleep", lambda s: None)
+    _seed_profile(monkeypatch, tmp_path)
+    page = _FakeDownloadPage(
+        download_content=None,  # no download fires -> falls into the page.content()-reading path
+        final_url="https://446346262425.sharepoint.com/:x:/t/IGInvestmentProduct/abc123",
+        final_html="<html>Excel Online viewer content, not a login page</html>",
+        content_raises_before_success=2,
+    )
+    context, browser = _install_fake_playwright(monkeypatch, page)
+
+    with pytest.raises(browser_session.BrowserDownloadNotTriggeredError):
+        browser_session.download_via_browser("igm_default", "https://example.test/file.xlsx")
+    assert browser.closed is True
+    assert context.storage_state_calls  # still reached the "valid session" refresh afterward
